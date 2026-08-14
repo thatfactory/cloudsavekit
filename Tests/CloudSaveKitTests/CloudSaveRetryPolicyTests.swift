@@ -5,6 +5,13 @@ import Testing
 
 @Suite("Cloud save retry policy")
 struct CloudSaveRetryPolicyTests {
+    @Test("Recognizes task and CloudKit cancellation")
+    func recognizesCancellation() {
+        #expect(CloudSaveRetryPolicy.isCancellation(CancellationError()))
+        #expect(CloudSaveRetryPolicy.isCancellation(CKError(.operationCancelled)))
+        #expect(!CloudSaveRetryPolicy.isCancellation(CKError(.networkFailure)))
+    }
+
     @Test(
         "Leaves transport and scheduling failures to CKSyncEngine",
         arguments: [

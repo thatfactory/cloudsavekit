@@ -304,6 +304,10 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
                 }
                 return record
             } catch {
+                guard !CloudSaveRetryPolicy.isCancellation(error) else {
+                    return nil
+                }
+
                 await self?.handleRecordMaterializationFailure(
                     error,
                     syncEngine: syncEngine,
