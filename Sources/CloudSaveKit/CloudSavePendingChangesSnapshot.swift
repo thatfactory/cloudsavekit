@@ -2,6 +2,9 @@ import Foundation
 
 /// Combines one durable host-ledger snapshot with mutations that raced with its asynchronous read.
 struct CloudSavePendingChangesSnapshot: Sendable {
+    /// The engine lifecycle generation in which the host-ledger read began.
+    let lifecycleGeneration: Int
+
     /// The authoritative pending changes returned by the host.
     let durableChanges: [CloudSavePendingChange]
 
@@ -12,6 +15,11 @@ struct CloudSavePendingChangesSnapshot: Sendable {
 // MARK: - Effective Changes
 
 extension CloudSavePendingChangesSnapshot {
+    /// Returns whether the snapshot was read during the specified engine lifecycle.
+    func belongs(to expectedLifecycleGeneration: Int) -> Bool {
+        lifecycleGeneration == expectedLifecycleGeneration
+    }
+
     /// Returns whether reconciliation leaves one exact change pending.
     func containsEffectiveChange(_ expectedChange: CloudSavePendingChange) -> Bool {
         var effectiveChange = durableChanges.last {

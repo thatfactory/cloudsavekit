@@ -62,10 +62,14 @@ public final actor CloudSaveEngine {
             )
         }
 
-        restoreDurablePendingChanges(
-            ledgerSnapshot,
-            syncEngine: engine
-        )
+        guard
+            restoreDurablePendingChanges(
+                ledgerSnapshot,
+                syncEngine: engine
+            )
+        else {
+            throw CloudSaveEngineError.hostRecoveryRequired
+        }
         publishStatus(syncEngine: engine)
         CloudSaveLogging.log(
             "start | pending=\(ledgerSnapshot.durableChanges.count)"
@@ -149,10 +153,14 @@ public final actor CloudSaveEngine {
         }
 
         try validate(session)
-        restoreDurablePendingChanges(
-            ledgerSnapshot,
-            syncEngine: session.syncEngine
-        )
+        guard
+            restoreDurablePendingChanges(
+                ledgerSnapshot,
+                syncEngine: session.syncEngine
+            )
+        else {
+            throw CloudSaveEngineError.hostRecoveryRequired
+        }
         restoreFailedZoneChangeIfNeeded(syncEngine: session.syncEngine)
 
         do {
@@ -241,8 +249,8 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
         ) { [client, weak self] recordID in
             let record = await client.record(for: recordID)
             if record == nil {
-                await self?.removePendingChanges(
-                    [.save(recordID)],
+                await self?.reconcileUnavailablePendingSave(
+                    recordID,
                     syncEngine: syncEngine
                 )
             }
@@ -429,11 +437,13 @@ extension CloudSaveEngine {
     /// Reads the host ledger while retaining every mutation that can race with its snapshot.
     fileprivate func readPendingChangesSnapshot() async throws -> CloudSavePendingChangesSnapshot {
         let snapshot = ledgerSnapshotTracker.beginSnapshot()
+        let snapshotLifecycleGeneration = lifecycleGeneration
 
         do {
             let durableChanges = try await client.pendingChanges()
             let subsequentMutations = ledgerSnapshotTracker.completeSnapshot(snapshot)
             return CloudSavePendingChangesSnapshot(
+                lifecycleGeneration: snapshotLifecycleGeneration,
                 durableChanges: durableChanges,
                 subsequentMutations: subsequentMutations
             )
@@ -480,7 +490,12 @@ extension CloudSaveEngine {
     fileprivate func restoreDurablePendingChanges(
         _ snapshot: CloudSavePendingChangesSnapshot,
         syncEngine: CKSyncEngine
-    ) {
+    ) -> Bool {
+        guard isCurrent(snapshot, syncEngine: syncEngine) else {
+            CloudSaveLogging.log("ledger snapshot | ignored stale lifecycle")
+            return false
+        }
+
         let configuredDurableChanges = snapshot.durableChanges.filter {
             isInConfiguredZone($0.recordID)
         }
@@ -527,6 +542,7 @@ extension CloudSaveEngine {
             Set(effectiveChanges.keys),
             in: configuration.zone.zoneID
         )
+        return true
     }
 
     /// Reconciles successful work against the host ledger without discarding a newer mutation.
@@ -534,39 +550,75 @@ extension CloudSaveEngine {
         _ acknowledgedChanges: [CloudSavePendingChange],
         syncEngine: CKSyncEngine
     ) async throws {
-        let snapshot = try await readPendingChangesSnapshot()
-        let completedChanges = acknowledgedChanges.filter {
-            !snapshot.containsEffectiveChange($0)
+        guard
+            try await reconcilePendingChangesAgainstHostLedger(
+                acknowledgedChanges,
+                syncEngine: syncEngine
+            ) != nil
+        else {
+            return
         }
 
-        ledgerSnapshotTracker.recordRemovals(completedChanges)
-        restoreDurablePendingChanges(
-            snapshot,
-            syncEngine: syncEngine
-        )
         stateMachine.resolve(recordIDs: acknowledgedChanges.map(\.recordID))
         publishStatus(syncEngine: syncEngine)
     }
 
-    /// Discards a pending change that the host can no longer materialize.
-    fileprivate func removePendingChanges(
-        _ changes: [CloudSavePendingChange],
+    /// Reconciles candidate removals against the current durable ledger and lifecycle.
+    fileprivate func reconcilePendingChangesAgainstHostLedger(
+        _ candidateChanges: [CloudSavePendingChange],
         syncEngine: CKSyncEngine
-    ) {
-        let configuredChanges = changes.filter {
-            isInConfiguredZone($0.recordID)
-        }
-        ledgerSnapshotTracker.recordRemovals(configuredChanges)
-
-        guard storedSyncEngine === syncEngine else {
-            return
+    ) async throws -> [CloudSavePendingChange]? {
+        let snapshot = try await readPendingChangesSnapshot()
+        guard isCurrent(snapshot, syncEngine: syncEngine) else {
+            CloudSaveLogging.log("ledger reconciliation | ignored stale lifecycle")
+            return nil
         }
 
-        syncEngine.state.remove(
-            pendingRecordZoneChanges: configuredChanges.map(\.syncEngineChange)
-        )
-        stateMachine.resolve(recordIDs: configuredChanges.map(\.recordID))
-        publishStatus(syncEngine: syncEngine)
+        let completedChanges = candidateChanges.filter {
+            !snapshot.containsEffectiveChange($0)
+        }
+
+        ledgerSnapshotTracker.recordRemovals(completedChanges)
+        guard restoreDurablePendingChanges(snapshot, syncEngine: syncEngine) else {
+            return nil
+        }
+
+        return completedChanges
+    }
+
+    /// Reconciles a nil record-provider result without discarding a newer durable save.
+    fileprivate func reconcileUnavailablePendingSave(
+        _ recordID: CKRecord.ID,
+        syncEngine: CKSyncEngine
+    ) async {
+        do {
+            guard
+                let completedChanges = try await reconcilePendingChangesAgainstHostLedger(
+                    [.save(recordID)],
+                    syncEngine: syncEngine
+                )
+            else {
+                return
+            }
+
+            stateMachine.resolve(recordIDs: completedChanges.map(\.recordID))
+            publishStatus(syncEngine: syncEngine)
+        } catch {
+            await handleHostFailure(
+                error,
+                syncEngine: syncEngine
+            )
+        }
+    }
+
+    /// Returns whether a host-ledger snapshot still belongs to the active engine lifecycle.
+    fileprivate func isCurrent(
+        _ snapshot: CloudSavePendingChangesSnapshot,
+        syncEngine: CKSyncEngine
+    ) -> Bool {
+        snapshot.belongs(to: lifecycleGeneration)
+            && storedSyncEngine === syncEngine
+            && !stateMachine.requiresHostRecovery
     }
 
     /// Restores a failed configured-zone save only for a host-requested explicit send.
@@ -592,10 +644,14 @@ extension CloudSaveEngine {
             syncEngine.state.add(
                 pendingDatabaseChanges: [.saveZone(configuration.zone)]
             )
-            restoreDurablePendingChanges(
-                ledgerSnapshot,
-                syncEngine: syncEngine
-            )
+            guard
+                restoreDurablePendingChanges(
+                    ledgerSnapshot,
+                    syncEngine: syncEngine
+                )
+            else {
+                throw CloudSaveEngineError.hostRecoveryRequired
+            }
             publishStatus(syncEngine: syncEngine)
             return
         }
@@ -618,10 +674,14 @@ extension CloudSaveEngine {
         syncEngine.state.add(
             pendingDatabaseChanges: [.saveZone(configuration.zone)]
         )
-        restoreDurablePendingChanges(
-            ledgerSnapshot,
-            syncEngine: syncEngine
-        )
+        guard
+            restoreDurablePendingChanges(
+                ledgerSnapshot,
+                syncEngine: syncEngine
+            )
+        else {
+            throw CloudSaveEngineError.hostRecoveryRequired
+        }
     }
 }
 
@@ -641,6 +701,7 @@ extension CloudSaveEngine {
             return
         }
 
+        lifecycleGeneration &+= 1
         try await client.handle(accountChange: accountChange)
         try await restorePendingChangesAfterAccountChange(
             accountChange,

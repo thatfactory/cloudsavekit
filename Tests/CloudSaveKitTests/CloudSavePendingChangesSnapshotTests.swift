@@ -11,6 +11,7 @@ struct CloudSavePendingChangesSnapshotTests {
             Self.makeRecordID(named: "edited-during-upload")
         )
         let snapshot = CloudSavePendingChangesSnapshot(
+            lifecycleGeneration: 1,
             durableChanges: [],
             subsequentMutations: [.enqueue(save)]
         )
@@ -24,6 +25,7 @@ struct CloudSavePendingChangesSnapshotTests {
             Self.makeRecordID(named: "completed")
         )
         let snapshot = CloudSavePendingChangesSnapshot(
+            lifecycleGeneration: 1,
             durableChanges: [save],
             subsequentMutations: [.remove(save)]
         )
@@ -37,6 +39,7 @@ struct CloudSavePendingChangesSnapshotTests {
         let save = CloudSavePendingChange.save(recordID)
         let delete = CloudSavePendingChange.delete(recordID)
         let snapshot = CloudSavePendingChangesSnapshot(
+            lifecycleGeneration: 1,
             durableChanges: [save],
             subsequentMutations: [
                 .enqueue(delete),
@@ -46,6 +49,18 @@ struct CloudSavePendingChangesSnapshotTests {
 
         #expect(!snapshot.containsEffectiveChange(save))
         #expect(snapshot.containsEffectiveChange(delete))
+    }
+
+    @Test("Rejects a snapshot from a previous engine lifecycle")
+    func rejectsPreviousLifecycle() {
+        let snapshot = CloudSavePendingChangesSnapshot(
+            lifecycleGeneration: 7,
+            durableChanges: [],
+            subsequentMutations: []
+        )
+
+        #expect(snapshot.belongs(to: 7))
+        #expect(!snapshot.belongs(to: 8))
     }
 }
 
