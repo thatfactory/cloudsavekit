@@ -9,7 +9,10 @@ public final actor CloudSaveEngine {
     private let client: any CloudSaveClient
     private let configuration: CloudSaveConfiguration
     private let statusContinuation: AsyncStream<CloudSaveStatus>.Continuation
+    private var lastPersistedStateSerialization: CKSyncEngine.State.Serialization?
+    private var pendingRecoveryOperation: RecoveryOperation?
     private var storedSyncEngine: CKSyncEngine?
+    private var unresolvedFailure: CloudSaveFailure?
 
     /// Creates an engine without starting synchronization.
     public init(
@@ -21,6 +24,7 @@ public final actor CloudSaveEngine {
         statusContinuation = stream.continuation
         self.client = client
         self.configuration = configuration
+        lastPersistedStateSerialization = configuration.stateSerialization
     }
 
     deinit {
@@ -65,7 +69,7 @@ public final actor CloudSaveEngine {
             try await syncEngine.fetchChanges(options)
         } catch {
             let failure = CloudSaveFailure(error: error)
-            statusContinuation.yield(.failed(failure))
+            await reportAttentionRequiredFailure(failure)
             throw error
         }
     }
@@ -79,7 +83,7 @@ public final actor CloudSaveEngine {
             try await syncEngine.sendChanges(options)
         } catch {
             let failure = CloudSaveFailure(error: error)
-            statusContinuation.yield(.failed(failure))
+            await reportAttentionRequiredFailure(failure)
             throw error
         }
     }
@@ -103,12 +107,18 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
         _ event: CKSyncEngine.Event,
         syncEngine: CKSyncEngine
     ) async {
+        guard storedSyncEngine === syncEngine else {
+            CloudSaveLogging.log("event | ignored stale engine")
+            return
+        }
+
         do {
             switch event {
             case .stateUpdate(let event):
                 try await client.persist(
                     stateSerialization: event.stateSerialization
                 )
+                lastPersistedStateSerialization = event.stateSerialization
             case .accountChange(let event):
                 try await client.handle(
                     accountChange: event.cloudSaveAccountChange
@@ -124,8 +134,8 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
                 )
             case .fetchedRecordZoneChanges(let event):
                 try await client.applyFetchedChanges(
-                    records: event.modifications.map(\.record),
-                    deletedRecordIDs: event.deletions.map(\.recordID)
+                    records: event.modifications.map(\.record).filter(isInConfiguredZone),
+                    deletedRecordIDs: event.deletions.map(\.recordID).filter(isInConfiguredZone)
                 )
             case .sentRecordZoneChanges(let event):
                 try await handleSentRecordZoneChanges(
@@ -133,16 +143,15 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
                     syncEngine: syncEngine
                 )
             case .sentDatabaseChanges(let event):
-                handleSentDatabaseChanges(
-                    event,
-                    syncEngine: syncEngine
-                )
+                await handleSentDatabaseChanges(event)
             case .willFetchChanges:
-                statusContinuation.yield(.fetching)
+                beginRecoveryOperation(.fetching)
             case .willSendChanges:
-                statusContinuation.yield(.sending)
-            case .didFetchChanges, .didSendChanges:
-                publishReadyStatus(syncEngine: syncEngine)
+                beginRecoveryOperation(.sending)
+            case .didFetchChanges:
+                completeRecoveryOperation(.fetching, syncEngine: syncEngine)
+            case .didSendChanges:
+                completeRecoveryOperation(.sending, syncEngine: syncEngine)
             case .willFetchRecordZoneChanges, .didFetchRecordZoneChanges:
                 break
             @unknown default:
@@ -153,11 +162,8 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
             }
         } catch {
             let failure = CloudSaveFailure(error: error)
-            statusContinuation.yield(.failed(failure))
-            await client.handle(
-                failure: failure,
-                recordID: nil
-            )
+            await reportAttentionRequiredFailure(failure)
+            await rebuildAfterClientFailure(syncEngine: syncEngine)
             CloudSaveLogging.log(
                 level: .error,
                 "event | failure=\(failure)"
@@ -232,7 +238,7 @@ extension CloudSaveEngine {
 
         var engineConfiguration = CKSyncEngine.Configuration(
             database: configuration.database,
-            stateSerialization: configuration.stateSerialization,
+            stateSerialization: lastPersistedStateSerialization,
             delegate: self
         )
         engineConfiguration.automaticallySync = configuration.automaticallySync
@@ -244,28 +250,14 @@ extension CloudSaveEngine {
     }
 
     fileprivate func handleSentDatabaseChanges(
-        _ event: CKSyncEngine.Event.SentDatabaseChanges,
-        syncEngine: CKSyncEngine
-    ) {
-        var didFail = false
+        _ event: CKSyncEngine.Event.SentDatabaseChanges
+    ) async {
         for failedSave in event.failedZoneSaves {
-            let failure = CloudSaveFailure(error: failedSave.error)
-            statusContinuation.yield(.failed(failure))
-            didFail = true
+            await handleFailedZoneChange(failedSave.error)
         }
 
         for (_, error) in event.failedZoneDeletes {
-            let failure = CloudSaveFailure(error: error)
-            statusContinuation.yield(.failed(failure))
-            didFail = true
-            CloudSaveLogging.log(
-                level: .error,
-                "zone delete | failure=\(failure)"
-            )
-        }
-
-        if !didFail {
-            publishReadyStatus(syncEngine: syncEngine)
+            await handleFailedZoneChange(error)
         }
     }
 
@@ -301,28 +293,30 @@ extension CloudSaveEngine {
                 break
             default:
                 let failure = CloudSaveFailure(error: failedSave.error)
-                await client.handle(
-                    failure: failure,
+                await reportAttentionRequiredFailure(
+                    failure,
                     recordID: recordID
                 )
-                statusContinuation.yield(.failed(failure))
                 didRequireAttention = true
             }
         }
 
         for (recordID, error) in event.failedRecordDeletes {
+            if error.isTransientCloudSaveError {
+                continue
+            }
+
             let failure = CloudSaveFailure(error: error)
-            await client.handle(
-                failure: failure,
+            await reportAttentionRequiredFailure(
+                failure,
                 recordID: recordID
             )
-            statusContinuation.yield(.failed(failure))
             didRequireAttention = true
         }
 
         syncEngine.state.add(pendingDatabaseChanges: zonesToRetry)
         syncEngine.state.add(pendingRecordZoneChanges: changesToRetry)
-        if !didRequireAttention {
+        if !didRequireAttention, unresolvedFailure == nil {
             publishReadyStatus(syncEngine: syncEngine)
         }
     }
@@ -332,11 +326,10 @@ extension CloudSaveEngine {
         changesToRetry: inout [CKSyncEngine.PendingRecordZoneChange]
     ) async throws -> Bool {
         guard let serverRecord = failedSave.error.serverRecord else {
-            await client.handle(
-                failure: .recordConflict,
+            await reportAttentionRequiredFailure(
+                .recordConflict,
                 recordID: failedSave.record.recordID
             )
-            statusContinuation.yield(.failed(.recordConflict))
             return true
         }
 
@@ -358,21 +351,119 @@ extension CloudSaveEngine {
             changesToRetry.append(.saveRecord(mergedRecord.recordID))
             return false
         case .requiresUserDecision:
-            await client.handle(
-                failure: .recordConflict,
+            await reportAttentionRequiredFailure(
+                .recordConflict,
                 recordID: failedSave.record.recordID
             )
-            statusContinuation.yield(.failed(.recordConflict))
             return true
         }
     }
 
+    /// Filters CloudKit fetches to the custom zone owned by this engine.
+    fileprivate func isInConfiguredZone(_ record: CKRecord) -> Bool {
+        isInConfiguredZone(record.recordID)
+    }
+
+    /// Filters CloudKit fetches to the custom zone owned by this engine.
+    fileprivate func isInConfiguredZone(_ recordID: CKRecord.ID) -> Bool {
+        recordID.zoneID == configuration.zone.zoneID
+    }
+
+    /// Starts a fetch or send that can clear an earlier attention-required failure.
+    fileprivate func beginRecoveryOperation(_ operation: RecoveryOperation) {
+        if unresolvedFailure != nil {
+            pendingRecoveryOperation = operation
+            return
+        }
+        statusContinuation.yield(operation.status)
+    }
+
+    /// Clears an earlier failure only after its replacement operation completes successfully.
+    fileprivate func completeRecoveryOperation(
+        _ operation: RecoveryOperation,
+        syncEngine: CKSyncEngine
+    ) {
+        guard pendingRecoveryOperation == operation else {
+            if unresolvedFailure == nil {
+                publishReadyStatus(syncEngine: syncEngine)
+            }
+            return
+        }
+
+        pendingRecoveryOperation = nil
+        unresolvedFailure = nil
+        publishReadyStatus(syncEngine: syncEngine)
+    }
+
+    /// Reports a durable failure while preserving it across completion events.
+    fileprivate func reportAttentionRequiredFailure(
+        _ failure: CloudSaveFailure,
+        recordID: CKRecord.ID? = nil
+    ) async {
+        pendingRecoveryOperation = nil
+        unresolvedFailure = failure
+        statusContinuation.yield(.failed(failure))
+        await client.handle(failure: failure, recordID: recordID)
+    }
+
+    /// Rebuilds the engine from its last durable checkpoint after a host write fails.
+    fileprivate func rebuildAfterClientFailure(syncEngine: CKSyncEngine) async {
+        await syncEngine.cancelOperations()
+        storedSyncEngine = nil
+
+        do {
+            try await start()
+        } catch {
+            CloudSaveLogging.log(
+                level: .error,
+                "rebuild | failure=\(CloudSaveFailure(error: error))"
+            )
+        }
+    }
+
+    /// Handles a zone change failure according to CKSyncEngine's retry policy.
+    fileprivate func handleFailedZoneChange(_ error: CKError) async {
+        guard !error.isTransientCloudSaveError else {
+            return
+        }
+
+        let failure = CloudSaveFailure(error: error)
+        await reportAttentionRequiredFailure(failure)
+        CloudSaveLogging.log(
+            level: .error,
+            "zone change | failure=\(failure)"
+        )
+    }
+
     fileprivate func publishReadyStatus(syncEngine: CKSyncEngine) {
+        guard unresolvedFailure == nil else {
+            return
+        }
+
         statusContinuation.yield(
             .ready(
                 hasPendingChanges: !syncEngine.state.pendingRecordZoneChanges.isEmpty
             )
         )
+    }
+}
+
+/// Identifies the synchronization operation that may resolve a previous failure.
+private enum RecoveryOperation: Equatable {
+    /// Fetches remote CloudKit changes.
+    case fetching
+
+    /// Sends locally durable CloudKit changes.
+    case sending
+
+    /// The public status reported while this operation is in progress.
+    var status: CloudSaveStatus {
+        switch self {
+        case .fetching:
+            .fetching
+        case .sending:
+            .sending
+        }
     }
 }
 
@@ -405,6 +496,20 @@ extension CKSyncEngine.Event.AccountChange {
             )
         @unknown default:
             .signedOut(previousAccountID: "unknown")
+        }
+    }
+}
+
+extension CKError {
+    /// Whether CKSyncEngine can retry this CloudKit error without application attention.
+    fileprivate var isTransientCloudSaveError: Bool {
+        switch code {
+        case .accountTemporarilyUnavailable, .networkFailure, .networkUnavailable,
+            .notAuthenticated, .operationCancelled, .requestRateLimited,
+            .serviceUnavailable, .zoneBusy:
+            true
+        default:
+            false
         }
     }
 }

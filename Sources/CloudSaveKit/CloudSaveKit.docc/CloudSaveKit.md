@@ -10,6 +10,8 @@ Create the engine early in application launch, call ``CloudSaveEngine/start()``,
 
 Automatic synchronization remains enabled by default. Use ``CloudSaveEngine/fetchNow()``, ``CloudSaveEngine/sendNow()``, or ``CloudSaveEngine/syncNow()`` only at user-visible checkpoints where immediate work is useful.
 
+CloudSaveKit forwards only records and deletions from its configured custom zone. If the host cannot persist a sync-engine checkpoint or apply a CloudKit result, the engine cancels the current work and rebuilds from its last durable checkpoint. An attention-required failure remains observable until a later fetch or send cycle completes successfully.
+
 ## Topics
 
 ### Engine
