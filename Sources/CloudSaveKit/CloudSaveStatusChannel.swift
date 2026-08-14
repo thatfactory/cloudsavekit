@@ -11,6 +11,7 @@ struct CloudSaveStatusChannel: Sendable {
             of: CloudSaveStatus.self,
             bufferingPolicy: .bufferingNewest(1)
         )
+        channel.continuation.yield(.idle)
         continuation = channel.continuation
         stream = channel.stream
     }
