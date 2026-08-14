@@ -12,6 +12,9 @@ public protocol CloudSaveClient: Sendable {
     func persist(stateSerialization: CKSyncEngine.State.Serialization) async throws
 
     /// Applies fetched records and deletions in one local transaction.
+    ///
+    /// Applying a record accepted during conflict resolution must also remove that record from the
+    /// host's durable pending-change ledger.
     func applyFetchedChanges(
         records: [CKRecord],
         deletedRecordIDs: [CKRecord.ID]

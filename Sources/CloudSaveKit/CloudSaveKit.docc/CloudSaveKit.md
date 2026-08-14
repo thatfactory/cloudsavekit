@@ -8,15 +8,18 @@ CloudSaveKit wraps Apple's `CKSyncEngine` lifecycle and delegate surface without
 
 Create the engine early in application launch, call ``CloudSaveEngine/start()``, and enqueue changes only after their corresponding local transactions succeed. Observe ``CloudSaveEngine/statusUpdates`` to project synchronization state into the host architecture.
 
-Automatic synchronization remains enabled by default. Use ``CloudSaveEngine/fetchNow()``, ``CloudSaveEngine/sendNow()``, or ``CloudSaveEngine/syncNow()`` only at user-visible checkpoints where immediate work is useful.
+Automatic synchronization remains enabled by default. Use ``CloudSaveEngine/fetchNow()``, ``CloudSaveEngine/sendNow()``, or ``CloudSaveEngine/syncNow()`` only at user-visible checkpoints where immediate work is useful. Explicit synchronization requires a successful ``CloudSaveEngine/start()`` and raises ``CloudSaveEngineError`` when the engine has not started or host recovery is required.
 
-CloudSaveKit forwards only records, record deletions, and custom-zone deletions from its configured custom zone. If the host cannot persist a sync-engine checkpoint or apply a CloudKit result, the engine cancels the current work and waits for the host to call ``CloudSaveEngine/start()`` after local recovery. Host callback failures are reported as ``CloudSaveFailure/localPersistence``. An attention-required failure remains observable until the matching later fetch or send cycle completes successfully.
+CloudSaveKit forwards only records, record deletions, and custom-zone deletions from its configured custom zone. If the host cannot persist a sync-engine checkpoint or apply a CloudKit result, the engine cancels the current work and waits for the host to call ``CloudSaveEngine/start()`` after local recovery. Host callback failures are reported as ``CloudSaveFailure/localPersistence``.
+
+CKSyncEngine retains recoverable transport failures and schedules their retries. CloudSaveKit keeps permanent and semantic failures independently by record, zone, operation, and host-persistence context. A successful fetch cannot erase a record upload failure, one successful record cannot erase another conflict, and completion from the operation that failed cannot immediately clear its own error. ``CloudSaveEngine/sendNow()`` reconciles CKSyncEngine state with the host's durable pending-change ledger before every explicit send.
 
 ## Topics
 
 ### Engine
 
 - ``CloudSaveEngine``
+- ``CloudSaveEngineError``
 - ``CloudSaveConfiguration``
 - ``CloudSaveStatus``
 

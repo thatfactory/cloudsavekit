@@ -30,6 +30,7 @@ CloudSaveKit owns CloudKit synchronization mechanics while the host application 
 - Schedule automatic synchronization and expose explicit fetch, send, and combined sync operations.
 - Forward fetched changes, account events, saved system fields, and semantic conflicts to the host.
 - Classify failures into privacy-safe values suitable for application state.
+- Preserve independent record, zone, operation, and host-persistence failures until their exact recovery conditions succeed.
 
 ## Quick start
 
@@ -76,9 +77,26 @@ try await engine.syncNow()
 
 Automatic synchronization should remain enabled in production. Explicit operations complement the system scheduler; they do not replace durable local saves or make offline networking possible.
 
+Call `start()` successfully before any explicit synchronization. `fetchNow()` and `sendNow()` throw `CloudSaveEngineError.notStarted` before startup and `CloudSaveEngineError.hostRecoveryRequired` after a host persistence callback fails. Once the local store is healthy again, call `start()` to rebuild from the last successfully persisted CKSyncEngine checkpoint and the host's current durable pending-change ledger.
+
+`sendNow()` reloads that ledger before sending. This makes the host the source of truth if CKSyncEngine discarded a semantic failure or if a previously persisted checkpoint still contains a change the host has since acknowledged.
+
+## Failure and retry policy
+
+CloudSaveKit leaves temporary transport, service, authentication, throttling, and cancellation failures to CKSyncEngine's scheduler. Explicit methods still throw their underlying error so the caller can finish its immediate workflow, but routine retryable errors do not become durable attention-required state.
+
+Semantic and permanent failures are tracked independently:
+
+- A record failure clears only when that record is saved, its deletion is acknowledged, or the host removes it from the durable pending ledger.
+- A zone failure clears only after that zone succeeds.
+- An explicit operation failure clears only after a later matching operation completes.
+- A host persistence failure stops the engine and blocks all synchronization until a successful `start()`.
+
+This follows [Apple's CKSyncEngine contract](https://developer.apple.com/documentation/cloudkit/cksyncengine-5sie5): the framework schedules and retries recoverable transport work, while the application persists engine state and resolves semantic record failures.
+
 ## Conflict handling
 
-CloudSaveKit forwards `serverRecordChanged` to `CloudSaveClient.resolve(conflict:)`. A retry record must be based on the supplied server record so it retains the current CloudKit change tag. The host may accept the server value, return a merged retry record, or preserve the conflict for a user decision.
+CloudSaveKit forwards `serverRecordChanged` to `CloudSaveClient.resolve(conflict:)`. A retry record must be based on the supplied server record so it retains the current CloudKit change tag. The host may accept the server value, return a merged retry record, or preserve the conflict for a user decision. Accepting the server must clear the corresponding item from the host's durable pending ledger when applying the server record; CloudSaveKit removes the same pending save from CKSyncEngine.
 
 ## Logging
 
