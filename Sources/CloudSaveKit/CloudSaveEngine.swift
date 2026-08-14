@@ -67,6 +67,10 @@ public final actor CloudSaveEngine {
                 scope: .zoneIDs([configuration.zone.zoneID])
             )
             try await syncEngine.fetchChanges(options)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as CKError where error.code == .operationCancelled {
+            throw error
         } catch {
             let failure = CloudSaveFailure(error: error)
             await reportAttentionRequiredFailure(failure)
@@ -81,6 +85,10 @@ public final actor CloudSaveEngine {
                 scope: .zoneIDs([configuration.zone.zoneID])
             )
             try await syncEngine.sendChanges(options)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as CKError where error.code == .operationCancelled {
+            throw error
         } catch {
             let failure = CloudSaveFailure(error: error)
             await reportAttentionRequiredFailure(failure)
@@ -129,7 +137,7 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
                 )
             case .fetchedDatabaseChanges(let event):
                 try await restoreDeletedZones(
-                    event.deletions.map(\.zoneID),
+                    event.deletions.map(\.zoneID).filter(isInConfiguredZone),
                     syncEngine: syncEngine
                 )
             case .fetchedRecordZoneChanges(let event):
@@ -161,7 +169,7 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
                 )
             }
         } catch {
-            let failure = CloudSaveFailure(error: error)
+            let failure = CloudSaveFailure(clientError: error)
             await reportAttentionRequiredFailure(failure)
             await rebuildAfterClientFailure(syncEngine: syncEngine)
             CloudSaveLogging.log(
@@ -217,11 +225,12 @@ extension CloudSaveEngine {
         _ zoneIDs: [CKRecordZone.ID],
         syncEngine: CKSyncEngine
     ) async throws {
-        try await client.applyDeletedZones(zoneIDs)
-        guard zoneIDs.contains(configuration.zone.zoneID) else {
+        let configuredZoneIDs = zoneIDs.filter(isInConfiguredZone)
+        guard !configuredZoneIDs.isEmpty else {
             return
         }
 
+        try await client.applyDeletedZones(configuredZoneIDs)
         let pendingChanges = try await client.pendingChanges()
         syncEngine.state.add(
             pendingDatabaseChanges: [.saveZone(configuration.zone)]
@@ -302,16 +311,24 @@ extension CloudSaveEngine {
         }
 
         for (recordID, error) in event.failedRecordDeletes {
-            if error.isTransientCloudSaveError {
-                continue
-            }
+            switch error.code {
+            case .unknownItem:
+                try await client.didDelete(recordIDs: [recordID])
+                syncEngine.state.remove(
+                    pendingRecordZoneChanges: [.deleteRecord(recordID)]
+                )
+            default:
+                if error.isTransientCloudSaveError {
+                    continue
+                }
 
-            let failure = CloudSaveFailure(error: error)
-            await reportAttentionRequiredFailure(
-                failure,
-                recordID: recordID
-            )
-            didRequireAttention = true
+                let failure = CloudSaveFailure(error: error)
+                await reportAttentionRequiredFailure(
+                    failure,
+                    recordID: recordID
+                )
+                didRequireAttention = true
+            }
         }
 
         syncEngine.state.add(pendingDatabaseChanges: zonesToRetry)
@@ -367,6 +384,11 @@ extension CloudSaveEngine {
     /// Filters CloudKit fetches to the custom zone owned by this engine.
     fileprivate func isInConfiguredZone(_ recordID: CKRecord.ID) -> Bool {
         recordID.zoneID == configuration.zone.zoneID
+    }
+
+    /// Filters custom-zone events to the zone owned by this engine.
+    fileprivate func isInConfiguredZone(_ zoneID: CKRecordZone.ID) -> Bool {
+        zoneID == configuration.zone.zoneID
     }
 
     /// Starts a fetch or send that can clear an earlier attention-required failure.

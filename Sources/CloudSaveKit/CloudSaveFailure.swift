@@ -32,6 +32,16 @@ public enum CloudSaveFailure: Equatable, Sendable {
 }
 
 extension CloudSaveFailure {
+    /// Classifies a failure raised by the host persistence boundary.
+    init(clientError error: any Error) {
+        guard error is CKError else {
+            self = .localPersistence
+            return
+        }
+
+        self.init(error: error)
+    }
+
     init(error: any Error) {
         guard let cloudError = error as? CKError else {
             self = .unknown(code: (error as NSError).code)

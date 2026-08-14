@@ -24,4 +24,14 @@ struct CloudSaveFailureTests {
 
         #expect(CloudSaveFailure(error: error) == expectedFailure)
     }
+
+    @Test("Classifies a host persistence failure")
+    func classifiesHostPersistenceFailure() {
+        let error = NSError(
+            domain: "CloudSaveKitTests",
+            code: 1
+        )
+
+        #expect(CloudSaveFailure(clientError: error) == .localPersistence)
+    }
 }
