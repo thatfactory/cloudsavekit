@@ -1,9 +1,10 @@
+import CloudKit
 import Foundation
 
 /// Retains ordered enqueues that occur while the host produces a durable-ledger snapshot.
 struct CloudSaveLedgerSnapshotTracker: Sendable {
     private var activeSnapshots: [Snapshot] = []
-    private var enqueuedChanges: [EnqueuedChange] = []
+    private var ledgerMutations: [TrackedMutation] = []
     private var latestGeneration = 0
     private var nextIdentifier = 0
 
@@ -18,54 +19,47 @@ struct CloudSaveLedgerSnapshotTracker: Sendable {
         return snapshot
     }
 
-    /// Records changes in the exact order in which the engine receives them.
-    mutating func record(_ changes: [CloudSavePendingChange]) {
-        guard !activeSnapshots.isEmpty else {
-            return
-        }
-
-        for change in changes {
-            latestGeneration &+= 1
-            enqueuedChanges.append(
-                EnqueuedChange(
-                    change: change,
-                    generation: latestGeneration
-                )
-            )
-        }
+    /// Records pending changes in the exact order in which the engine receives them.
+    mutating func recordEnqueues(_ changes: [CloudSavePendingChange]) {
+        record(changes.map(CloudSaveLedgerMutation.enqueue))
     }
 
-    /// Completes a snapshot and returns changes enqueued after its ledger read began.
-    mutating func completeSnapshot(_ snapshot: Snapshot) -> [CloudSavePendingChange] {
+    /// Records removed pending changes in the exact order in which the host commits them.
+    mutating func recordRemovals(_ changes: [CloudSavePendingChange]) {
+        record(changes.map(CloudSaveLedgerMutation.remove))
+    }
+
+    /// Completes a snapshot and returns ledger mutations committed after its read began.
+    mutating func completeSnapshot(_ snapshot: Snapshot) -> [CloudSaveLedgerMutation] {
         guard remove(snapshot) else {
             return []
         }
 
-        let changes: [CloudSavePendingChange] = enqueuedChanges.compactMap { enqueuedChange in
-            guard enqueuedChange.generation > snapshot.generation else {
+        let mutations: [CloudSaveLedgerMutation] = ledgerMutations.compactMap { trackedMutation in
+            guard trackedMutation.generation > snapshot.generation else {
                 return nil
             }
 
-            return enqueuedChange.change
+            return trackedMutation.mutation
         }
-        pruneChangesNoLongerNeeded()
-        return changes
+        pruneMutationsNoLongerNeeded()
+        return mutations
     }
 
-    /// Cancels a snapshot without replaying its concurrently enqueued changes.
+    /// Cancels a snapshot without replaying its concurrent ledger mutations.
     mutating func cancelSnapshot(_ snapshot: Snapshot) {
         guard remove(snapshot) else {
             return
         }
 
-        pruneChangesNoLongerNeeded()
+        pruneMutationsNoLongerNeeded()
     }
 }
 
 // MARK: - Snapshot
 
 extension CloudSaveLedgerSnapshotTracker {
-    /// Identifies the enqueue generation visible when one host-ledger read begins.
+    /// Identifies the ledger generation visible when one host-ledger read begins.
     struct Snapshot: Equatable, Sendable {
         fileprivate let generation: Int
         fileprivate let identifier: Int
@@ -75,10 +69,27 @@ extension CloudSaveLedgerSnapshotTracker {
 // MARK: - Private
 
 extension CloudSaveLedgerSnapshotTracker {
-    /// Associates one ordered pending change with its enqueue generation.
-    private struct EnqueuedChange: Sendable {
-        let change: CloudSavePendingChange
+    /// Associates one ordered ledger mutation with its generation.
+    private struct TrackedMutation: Sendable {
         let generation: Int
+        let mutation: CloudSaveLedgerMutation
+    }
+
+    /// Records ledger mutations only while at least one asynchronous snapshot is suspended.
+    private mutating func record(_ mutations: [CloudSaveLedgerMutation]) {
+        guard !activeSnapshots.isEmpty else {
+            return
+        }
+
+        for mutation in mutations {
+            latestGeneration &+= 1
+            ledgerMutations.append(
+                TrackedMutation(
+                    generation: latestGeneration,
+                    mutation: mutation
+                )
+            )
+        }
     }
 
     /// Removes one active snapshot if it is still tracked.
@@ -91,15 +102,15 @@ extension CloudSaveLedgerSnapshotTracker {
         return true
     }
 
-    /// Discards changes that every remaining host-ledger snapshot already includes.
-    private mutating func pruneChangesNoLongerNeeded() {
+    /// Discards mutations that every remaining host-ledger snapshot already includes.
+    private mutating func pruneMutationsNoLongerNeeded() {
         guard let oldestGeneration = activeSnapshots.map(\.generation).min() else {
-            enqueuedChanges.removeAll(keepingCapacity: true)
+            ledgerMutations.removeAll(keepingCapacity: true)
             return
         }
 
-        enqueuedChanges.removeAll { enqueuedChange in
-            enqueuedChange.generation <= oldestGeneration
+        ledgerMutations.removeAll { trackedMutation in
+            trackedMutation.generation <= oldestGeneration
         }
     }
 }

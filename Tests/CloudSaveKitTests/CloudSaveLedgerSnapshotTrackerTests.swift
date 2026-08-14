@@ -17,9 +17,12 @@ struct CloudSaveLedgerSnapshotTrackerTests {
         var tracker = CloudSaveLedgerSnapshotTracker()
 
         let snapshot = tracker.beginSnapshot()
-        tracker.record(expectedChanges)
+        tracker.recordEnqueues(expectedChanges)
 
-        #expect(tracker.completeSnapshot(snapshot) == expectedChanges)
+        #expect(
+            tracker.completeSnapshot(snapshot)
+                == expectedChanges.map(CloudSaveLedgerMutation.enqueue)
+        )
     }
 
     @Test("Preserves the suffix required by every overlapping ledger read")
@@ -33,12 +36,15 @@ struct CloudSaveLedgerSnapshotTrackerTests {
         var tracker = CloudSaveLedgerSnapshotTracker()
 
         let earlierSnapshot = tracker.beginSnapshot()
-        tracker.record([firstChange])
+        tracker.recordEnqueues([firstChange])
         let laterSnapshot = tracker.beginSnapshot()
-        tracker.record([secondChange])
+        tracker.recordEnqueues([secondChange])
 
-        #expect(tracker.completeSnapshot(laterSnapshot) == [secondChange])
-        #expect(tracker.completeSnapshot(earlierSnapshot) == [firstChange, secondChange])
+        #expect(tracker.completeSnapshot(laterSnapshot) == [.enqueue(secondChange)])
+        #expect(
+            tracker.completeSnapshot(earlierSnapshot)
+                == [.enqueue(firstChange), .enqueue(secondChange)]
+        )
     }
 
     @Test("Completing an older ledger read retains the suffix needed by a newer read")
@@ -52,12 +58,15 @@ struct CloudSaveLedgerSnapshotTrackerTests {
         var tracker = CloudSaveLedgerSnapshotTracker()
 
         let earlierSnapshot = tracker.beginSnapshot()
-        tracker.record([firstChange])
+        tracker.recordEnqueues([firstChange])
         let laterSnapshot = tracker.beginSnapshot()
-        tracker.record([secondChange])
+        tracker.recordEnqueues([secondChange])
 
-        #expect(tracker.completeSnapshot(earlierSnapshot) == [firstChange, secondChange])
-        #expect(tracker.completeSnapshot(laterSnapshot) == [secondChange])
+        #expect(
+            tracker.completeSnapshot(earlierSnapshot)
+                == [.enqueue(firstChange), .enqueue(secondChange)]
+        )
+        #expect(tracker.completeSnapshot(laterSnapshot) == [.enqueue(secondChange)])
     }
 
     @Test("Does not retain enqueues when no ledger read is suspended")
@@ -67,7 +76,7 @@ struct CloudSaveLedgerSnapshotTrackerTests {
         )
         var tracker = CloudSaveLedgerSnapshotTracker()
 
-        tracker.record([change])
+        tracker.recordEnqueues([change])
         let snapshot = tracker.beginSnapshot()
 
         #expect(tracker.completeSnapshot(snapshot).isEmpty)
@@ -82,10 +91,37 @@ struct CloudSaveLedgerSnapshotTrackerTests {
 
         let earlierSnapshot = tracker.beginSnapshot()
         let cancelledSnapshot = tracker.beginSnapshot()
-        tracker.record([change])
+        tracker.recordEnqueues([change])
         tracker.cancelSnapshot(cancelledSnapshot)
 
-        #expect(tracker.completeSnapshot(earlierSnapshot) == [change])
+        #expect(tracker.completeSnapshot(earlierSnapshot) == [.enqueue(change)])
+    }
+
+    @Test("Preserves acknowledgements that race with a ledger read")
+    func preservesConcurrentAcknowledgements() {
+        let recordID = Self.makeRecordID(named: "acknowledged")
+        var tracker = CloudSaveLedgerSnapshotTracker()
+
+        let snapshot = tracker.beginSnapshot()
+        tracker.recordRemovals([.save(recordID)])
+
+        #expect(tracker.completeSnapshot(snapshot) == [.remove(.save(recordID))])
+    }
+
+    @Test("Preserves enqueue and acknowledgement order for one record")
+    func preservesMutationOrder() {
+        let recordID = Self.makeRecordID(named: "ordered")
+        let change = CloudSavePendingChange.save(recordID)
+        var tracker = CloudSaveLedgerSnapshotTracker()
+
+        let snapshot = tracker.beginSnapshot()
+        tracker.recordEnqueues([change])
+        tracker.recordRemovals([change])
+
+        #expect(
+            tracker.completeSnapshot(snapshot)
+                == [.enqueue(change), .remove(change)]
+        )
     }
 }
 

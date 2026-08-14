@@ -8,6 +8,8 @@ public final actor CloudSaveEngine {
 
     private let client: any CloudSaveClient
     private let configuration: CloudSaveConfiguration
+    private let eventHandlingLock = CloudSaveAsyncLock()
+    private let statePersistenceLock = CloudSaveAsyncLock()
     private let statusContinuation: AsyncStream<CloudSaveStatus>.Continuation
     private var lastPersistedStateSerialization: CKSyncEngine.State.Serialization?
     private var ledgerSnapshotTracker = CloudSaveLedgerSnapshotTracker()
@@ -75,7 +77,7 @@ public final actor CloudSaveEngine {
         let configuredChanges = changes.filter {
             isInConfiguredZone($0.recordID)
         }
-        ledgerSnapshotTracker.record(configuredChanges)
+        ledgerSnapshotTracker.recordEnqueues(configuredChanges)
 
         guard !stateMachine.requiresHostRecovery else {
             CloudSaveLogging.log(
@@ -208,6 +210,55 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
         _ event: CKSyncEngine.Event,
         syncEngine: CKSyncEngine
     ) async {
+        await eventHandlingLock.withLock { [self] in
+            await handleEventInOrder(
+                event,
+                syncEngine: syncEngine
+            )
+        }
+    }
+
+    public func nextRecordZoneChangeBatch(
+        _ context: CKSyncEngine.SendChangesContext,
+        syncEngine: CKSyncEngine
+    ) async -> CKSyncEngine.RecordZoneChangeBatch? {
+        guard storedSyncEngine === syncEngine,
+            !stateMachine.requiresHostRecovery
+        else {
+            return nil
+        }
+
+        let pendingChanges = syncEngine.state.pendingRecordZoneChanges.filter {
+            guard let recordID = $0.recordID else {
+                return false
+            }
+
+            return context.options.scope.contains($0) && isInConfiguredZone(recordID)
+        }
+
+        return await CKSyncEngine.RecordZoneChangeBatch(
+            pendingChanges: pendingChanges
+        ) { [client, weak self] recordID in
+            let record = await client.record(for: recordID)
+            if record == nil {
+                await self?.removePendingChanges(
+                    [.save(recordID)],
+                    syncEngine: syncEngine
+                )
+            }
+            return record
+        }
+    }
+}
+
+// MARK: - Private Ordered Events
+
+extension CloudSaveEngine {
+    /// Processes one CKSyncEngine event without allowing later events to overtake its host writes.
+    fileprivate func handleEventInOrder(
+        _ event: CKSyncEngine.Event,
+        syncEngine: CKSyncEngine
+    ) async {
         guard storedSyncEngine === syncEngine else {
             CloudSaveLogging.log("event | ignored stale engine")
             return
@@ -216,7 +267,10 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
         do {
             switch event {
             case .stateUpdate(let event):
-                try await persistStateUpdate(event)
+                try await persistStateUpdate(
+                    event,
+                    syncEngine: syncEngine
+                )
             case .accountChange(let event):
                 try await handleAccountChange(
                     event,
@@ -267,37 +321,6 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
                 level: .error,
                 "event | failure=\(CloudSaveFailure(clientError: error))"
             )
-        }
-    }
-
-    public func nextRecordZoneChangeBatch(
-        _ context: CKSyncEngine.SendChangesContext,
-        syncEngine: CKSyncEngine
-    ) async -> CKSyncEngine.RecordZoneChangeBatch? {
-        guard storedSyncEngine === syncEngine,
-            !stateMachine.requiresHostRecovery
-        else {
-            return nil
-        }
-
-        let pendingChanges = syncEngine.state.pendingRecordZoneChanges.filter {
-            guard let recordID = $0.recordID else {
-                return false
-            }
-
-            return context.options.scope.contains($0) && isInConfiguredZone(recordID)
-        }
-
-        return await CKSyncEngine.RecordZoneChangeBatch(
-            pendingChanges: pendingChanges
-        ) { [client] recordID in
-            let record = await client.record(for: recordID)
-            if record == nil {
-                syncEngine.state.remove(
-                    pendingRecordZoneChanges: [.saveRecord(recordID)]
-                )
-            }
-            return record
         }
     }
 }
@@ -369,32 +392,50 @@ extension CloudSaveEngine {
         throw CloudSaveEngineError.hostRecoveryRequired
     }
 
-    /// Stops all work after a host persistence failure and preserves the last good checkpoint.
-    fileprivate func stopAfterHostFailure(syncEngine: CKSyncEngine?) async {
+    /// Invalidates one active engine only after every earlier checkpoint write completes.
+    fileprivate func invalidateAfterHostFailure(
+        _ failure: CloudSaveFailure,
+        syncEngine: CKSyncEngine?
+    ) -> (
+        shouldHandle: Bool,
+        engineToCancel: CKSyncEngine?
+    ) {
         guard syncEngine == nil || storedSyncEngine === syncEngine else {
-            return
+            return (
+                shouldHandle: false,
+                engineToCancel: nil
+            )
         }
 
         let engineToCancel = syncEngine ?? storedSyncEngine
+        lifecycleGeneration &+= 1
+        stateMachine.fail(
+            failure,
+            context: .hostPersistence
+        )
         storedSyncEngine = nil
         stateMachine.resetActiveOperations()
-        await engineToCancel?.cancelOperations()
+        publishStatus(syncEngine: engineToCancel)
+        return (
+            shouldHandle: true,
+            engineToCancel: engineToCancel
+        )
     }
 }
 
 // MARK: - Private Host Persistence
 
 extension CloudSaveEngine {
-    /// Reads the host ledger while retaining every enqueue that can race with its snapshot.
+    /// Reads the host ledger while retaining every mutation that can race with its snapshot.
     fileprivate func readPendingChangesSnapshot() async throws -> CloudSavePendingChangesSnapshot {
         let snapshot = ledgerSnapshotTracker.beginSnapshot()
 
         do {
             let durableChanges = try await client.pendingChanges()
-            let subsequentlyEnqueuedChanges = ledgerSnapshotTracker.completeSnapshot(snapshot)
+            let subsequentMutations = ledgerSnapshotTracker.completeSnapshot(snapshot)
             return CloudSavePendingChangesSnapshot(
                 durableChanges: durableChanges,
-                subsequentlyEnqueuedChanges: subsequentlyEnqueuedChanges
+                subsequentMutations: subsequentMutations
             )
         } catch {
             ledgerSnapshotTracker.cancelSnapshot(snapshot)
@@ -404,11 +445,34 @@ extension CloudSaveEngine {
 
     /// Persists an opaque state update before accepting it as the next recovery checkpoint.
     fileprivate func persistStateUpdate(
-        _ event: CKSyncEngine.Event.StateUpdate
+        _ event: CKSyncEngine.Event.StateUpdate,
+        syncEngine: CKSyncEngine
     ) async throws {
+        try await statePersistenceLock.withLock { [self] in
+            try await persistStateUpdateInOrder(
+                event,
+                syncEngine: syncEngine
+            )
+        }
+    }
+
+    /// Writes a checkpoint only while its originating engine remains active.
+    fileprivate func persistStateUpdateInOrder(
+        _ event: CKSyncEngine.Event.StateUpdate,
+        syncEngine: CKSyncEngine
+    ) async throws {
+        guard storedSyncEngine === syncEngine else {
+            return
+        }
+
         try await client.persist(
             stateSerialization: event.stateSerialization
         )
+
+        guard storedSyncEngine === syncEngine else {
+            return
+        }
+
         lastPersistedStateSerialization = event.stateSerialization
     }
 
@@ -420,9 +484,9 @@ extension CloudSaveEngine {
         let configuredDurableChanges = snapshot.durableChanges.filter {
             isInConfiguredZone($0.recordID)
         }
-        let configuredSubsequentChanges = snapshot.subsequentlyEnqueuedChanges.filter {
-            isInConfiguredZone($0.recordID)
-        }
+        let configuredSubsequentMutations = snapshot.subsequentMutations.filter(
+            isInConfiguredZone
+        )
         let durableChanges = configuredDurableChanges.map(\.syncEngineChange)
         let durableChangeSet = Set(durableChanges)
         let staleChanges = syncEngine.state.pendingRecordZoneChanges.filter {
@@ -439,15 +503,51 @@ extension CloudSaveEngine {
         syncEngine.state.add(
             pendingRecordZoneChanges: durableChanges
         )
-        syncEngine.state.add(
-            pendingRecordZoneChanges: configuredSubsequentChanges.map(\.syncEngineChange)
-        )
+        var effectiveChanges: [CKRecord.ID: CloudSavePendingChange] = [:]
+        for change in configuredDurableChanges {
+            effectiveChanges[change.recordID] = change
+        }
+        for mutation in configuredSubsequentMutations {
+            switch mutation {
+            case .enqueue(let change):
+                syncEngine.state.add(
+                    pendingRecordZoneChanges: [change.syncEngineChange]
+                )
+                effectiveChanges[change.recordID] = change
+            case .remove(let change):
+                syncEngine.state.remove(
+                    pendingRecordZoneChanges: [change.syncEngineChange]
+                )
+                if effectiveChanges[change.recordID] == change {
+                    effectiveChanges[change.recordID] = nil
+                }
+            }
+        }
         stateMachine.reconcilePendingRecordIDs(
-            Set(
-                (configuredDurableChanges + configuredSubsequentChanges).map(\.recordID)
-            ),
+            Set(effectiveChanges.keys),
             in: configuration.zone.zoneID
         )
+    }
+
+    /// Removes acknowledged host-ledger entries from snapshots and the active engine.
+    fileprivate func removePendingChanges(
+        _ changes: [CloudSavePendingChange],
+        syncEngine: CKSyncEngine
+    ) {
+        let configuredChanges = changes.filter {
+            isInConfiguredZone($0.recordID)
+        }
+        ledgerSnapshotTracker.recordRemovals(configuredChanges)
+
+        guard storedSyncEngine === syncEngine else {
+            return
+        }
+
+        syncEngine.state.remove(
+            pendingRecordZoneChanges: configuredChanges.map(\.syncEngineChange)
+        )
+        stateMachine.resolve(recordIDs: configuredChanges.map(\.recordID))
+        publishStatus(syncEngine: syncEngine)
     }
 
     /// Restores a failed configured-zone save only for a host-requested explicit send.
@@ -563,9 +663,14 @@ extension CloudSaveEngine {
         let deletedRecordIDs = event.deletedRecordIDs.filter(isInConfiguredZone)
 
         try await client.didSave(records: savedRecords)
+        removePendingChanges(
+            savedRecords.map { .save($0.recordID) },
+            syncEngine: syncEngine
+        )
         try await client.didDelete(recordIDs: deletedRecordIDs)
-        stateMachine.resolve(
-            recordIDs: savedRecords.map(\.recordID) + deletedRecordIDs
+        removePendingChanges(
+            deletedRecordIDs.map(CloudSavePendingChange.delete),
+            syncEngine: syncEngine
         )
 
         var changesToRetry: [CKSyncEngine.PendingRecordZoneChange] = []
@@ -604,10 +709,10 @@ extension CloudSaveEngine {
             switch error.code {
             case .unknownItem, .zoneNotFound:
                 try await client.didDelete(recordIDs: [recordID])
-                syncEngine.state.remove(
-                    pendingRecordZoneChanges: [.deleteRecord(recordID)]
+                removePendingChanges(
+                    [.delete(recordID)],
+                    syncEngine: syncEngine
                 )
-                stateMachine.resolve(.record(recordID))
                 if error.code == .zoneNotFound {
                     zonesToRetry.append(.saveZone(configuration.zone))
                 }
@@ -657,10 +762,10 @@ extension CloudSaveEngine {
                 records: [serverRecord],
                 deletedRecordIDs: []
             )
-            syncEngine.state.remove(
-                pendingRecordZoneChanges: [.saveRecord(recordID)]
+            removePendingChanges(
+                [.save(recordID)],
+                syncEngine: syncEngine
             )
-            stateMachine.resolve(.record(recordID))
         case .retry(let mergedRecord):
             try await client.persistResolvedRecord(mergedRecord)
             changesToRetry.append(.saveRecord(mergedRecord.recordID))
@@ -735,13 +840,17 @@ extension CloudSaveEngine {
         syncEngine: CKSyncEngine?
     ) async {
         let failure = CloudSaveFailure(clientError: error)
-        lifecycleGeneration &+= 1
-        stateMachine.fail(
-            failure,
-            context: .hostPersistence
-        )
-        publishStatus(syncEngine: syncEngine)
-        await stopAfterHostFailure(syncEngine: syncEngine)
+        let invalidation = await statePersistenceLock.withLock { [self] in
+            await invalidateAfterHostFailure(
+                failure,
+                syncEngine: syncEngine
+            )
+        }
+        guard invalidation.shouldHandle else {
+            return
+        }
+
+        await invalidation.engineToCancel?.cancelOperations()
         await client.handle(
             failure: failure,
             recordID: nil
@@ -792,6 +901,16 @@ extension CloudSaveEngine {
     /// Filters CloudKit fetches to the custom zone owned by this engine.
     fileprivate func isInConfiguredZone(_ record: CKRecord) -> Bool {
         isInConfiguredZone(record.recordID)
+    }
+
+    /// Filters host-ledger mutations to the custom zone owned by this engine.
+    fileprivate func isInConfiguredZone(_ mutation: CloudSaveLedgerMutation) -> Bool {
+        switch mutation {
+        case .enqueue(let change):
+            isInConfiguredZone(change.recordID)
+        case .remove(let change):
+            isInConfiguredZone(change.recordID)
+        }
     }
 
     /// Filters CloudKit changes to the custom zone owned by this engine.
