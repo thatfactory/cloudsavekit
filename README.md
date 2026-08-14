@@ -4,7 +4,7 @@
   <a href="https://en.wikipedia.org/wiki/List_of_Apple_operating_systems"><img alt="Platforms" src="https://img.shields.io/badge/anyAppleOS-26%2B-lightgrey.svg?logo=apple&logoColor=white"></a>
   <a href="https://developer.apple.com/documentation/xcode/swift-packages"><img alt="SPM" src="https://img.shields.io/badge/SPM-ready-b68f6a.svg?logo=gitlfs&logoColor=white"></a>
   <a href="https://en.wikipedia.org/wiki/MIT_License"><img alt="License" src="https://img.shields.io/badge/License-MIT-67ac5b.svg?logo=googledocs&logoColor=white"></a>
-  <a href="https://github.com/thatfactory/cloudsavekit/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/thatfactory/cloudsavekit/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/thatfactory/cloudsavekit/actions/workflows/ci-pr.yml"><img alt="CI" src="https://github.com/thatfactory/cloudsavekit/actions/workflows/ci-pr.yml/badge.svg"></a>
   <a href="https://github.com/thatfactory/cloudsavekit/actions/workflows/release.yml"><img alt="Release" src="https://github.com/thatfactory/cloudsavekit/actions/workflows/release.yml/badge.svg"></a>
   <a href="https://thatfactory.github.io/cloudsavekit/documentation/cloudsavekit/"><img alt="DocC" src="https://img.shields.io/badge/DocC-documentation-0288D1.svg?logo=bookstack&logoColor=white"></a>
 </p>
@@ -12,6 +12,13 @@
 # CloudSaveKit
 
 A reusable `CKSyncEngine` coordinator for synchronizing app-owned local data with a private CloudKit database. ☁️
+
+```mermaid
+flowchart LR
+    LocalStore["Host local store"] --> Client["CloudSaveClient"]
+    Client <--> Engine["CloudSaveEngine"]
+    Engine <--> CloudKit["Private CloudKit database"]
+```
 
 CloudSaveKit owns CloudKit synchronization mechanics while the host application remains responsible for its local persistence, record schema, merge semantics, and user experience. It deliberately has no dependency on SwiftData, Core Data, Redux, or SwiftUI.
 
