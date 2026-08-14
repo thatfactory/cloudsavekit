@@ -1,0 +1,23 @@
+---
+name: Nightly Tests
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nightly_tests:
+    name: Nightly Tests
+    runs-on: [self-hosted, macOS]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          clean: true
+
+      - name: Run Tests
+        run: swift test -v

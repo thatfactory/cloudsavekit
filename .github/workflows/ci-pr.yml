@@ -1,0 +1,33 @@
+---
+name: Pull Request CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: Swift Format
+    runs-on: [self-hosted, macOS]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Lint Swift Sources
+        run: AgentGuidelines/Scripts/swift_format.sh lint-strict Sources Tests
+
+  test:
+    name: Test
+    runs-on: [self-hosted, macOS]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          clean: true
+
+      - name: Run Tests
+        run: swift test -v
