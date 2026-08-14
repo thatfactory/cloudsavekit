@@ -285,23 +285,32 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
         let batch = await CKSyncEngine.RecordZoneChangeBatch(
             pendingChanges: pendingChanges
         ) { [client, weak self] recordID in
-            let record = await client.record(for: recordID)
-            guard
-                await self?.isActive(
+            do {
+                let record = try await client.record(for: recordID)
+                guard
+                    await self?.isActive(
+                        syncEngine: syncEngine,
+                        lifecycleGeneration: batchLifecycleGeneration
+                    ) == true
+                else {
+                    return nil
+                }
+
+                if record == nil {
+                    await self?.reconcileUnavailablePendingSave(
+                        recordID,
+                        syncEngine: syncEngine
+                    )
+                }
+                return record
+            } catch {
+                await self?.handleRecordMaterializationFailure(
+                    error,
                     syncEngine: syncEngine,
                     lifecycleGeneration: batchLifecycleGeneration
-                ) == true
-            else {
+                )
                 return nil
             }
-
-            if record == nil {
-                await self?.reconcileUnavailablePendingSave(
-                    recordID,
-                    syncEngine: syncEngine
-                )
-            }
-            return record
         }
         guard
             isActive(
@@ -812,6 +821,40 @@ extension CloudSaveEngine {
         }
     }
 
+    /// Stops the active engine when its host cannot materialize a pending record.
+    fileprivate func handleRecordMaterializationFailure(
+        _ error: any Error,
+        syncEngine: CKSyncEngine,
+        lifecycleGeneration: Int
+    ) {
+        guard
+            isActive(
+                syncEngine: syncEngine,
+                lifecycleGeneration: lifecycleGeneration
+            )
+        else {
+            return
+        }
+
+        let failure = CloudSaveFailure(clientError: error)
+        guard
+            let invalidation = beginHostFailureInvalidation(
+                failure,
+                syncEngine: syncEngine
+            )
+        else {
+            return
+        }
+
+        Task { [weak self] in
+            await self?.completeHostFailureInvalidation(
+                failure,
+                lifecycleGeneration: invalidation.lifecycleGeneration,
+                engineToCancel: invalidation.engineToCancel
+            )
+        }
+    }
+
     /// Returns whether a host-ledger snapshot still belongs to the active engine lifecycle.
     fileprivate func isCurrent(
         _ snapshot: CloudSavePendingChangesSnapshot,
@@ -1197,18 +1240,31 @@ extension CloudSaveEngine {
             return
         }
 
+        await completeHostFailureInvalidation(
+            failure,
+            lifecycleGeneration: invalidation.lifecycleGeneration,
+            engineToCancel: invalidation.engineToCancel
+        )
+    }
+
+    /// Completes failed-engine checkpoint ordering, cancellation, and host notification.
+    fileprivate func completeHostFailureInvalidation(
+        _ failure: CloudSaveFailure,
+        lifecycleGeneration: Int,
+        engineToCancel: CKSyncEngine?
+    ) async {
         let didFinish = await statePersistenceLock.withLock { [self] in
             await finishHostFailureInvalidation(
                 failure,
-                lifecycleGeneration: invalidation.lifecycleGeneration,
-                syncEngine: invalidation.engineToCancel
+                lifecycleGeneration: lifecycleGeneration,
+                syncEngine: engineToCancel
             )
         }
         guard didFinish else {
             return
         }
 
-        await invalidation.engineToCancel?.cancelOperations()
+        await engineToCancel?.cancelOperations()
         endHostFailureInvalidation()
         await client.handle(
             failure: failure,

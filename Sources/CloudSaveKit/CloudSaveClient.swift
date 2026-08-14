@@ -6,7 +6,10 @@ public protocol CloudSaveClient: Sendable {
     func pendingChanges() async throws -> [CloudSavePendingChange]
 
     /// Materializes the current local value for a pending record save.
-    func record(for recordID: CKRecord.ID) async -> CKRecord?
+    ///
+    /// Return `nil` only when the record no longer exists. Throw when local persistence cannot read
+    /// or decode a record so ``CloudSaveEngine`` can enter host recovery.
+    func record(for recordID: CKRecord.ID) async throws -> CKRecord?
 
     /// Persists CKSyncEngine's opaque state after every state update.
     func persist(stateSerialization: CKSyncEngine.State.Serialization) async throws
