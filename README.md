@@ -95,7 +95,7 @@ Semantic and permanent failures are tracked independently:
 
 - A record failure clears only when that record is saved, its deletion is acknowledged, or the host removes it from the durable pending ledger.
 - A zone failure clears only after that zone succeeds.
-- An explicit operation failure clears only after a later matching operation completes.
+- An explicit operation failure clears only after a later matching operation completes and every older overlapping operation of that kind has drained.
 - A host persistence failure stops the engine and blocks all synchronization until a successful `start()`.
 
 This follows [Apple's CKSyncEngine contract](https://developer.apple.com/documentation/cloudkit/cksyncengine-5sie5): the framework schedules and retries recoverable transport work, while the application persists engine state and resolves semantic record failures.

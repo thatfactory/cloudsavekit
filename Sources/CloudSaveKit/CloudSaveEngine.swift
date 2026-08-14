@@ -12,6 +12,7 @@ public final actor CloudSaveEngine {
     private let statePersistenceLock = CloudSaveAsyncLock()
     private let statusContinuation: AsyncStream<CloudSaveStatus>.Continuation
     private var isHostFailureInvalidationPending = false
+    private var hostFailureInvalidationWaiters: [CheckedContinuation<Void, Never>] = []
     private var lastPersistedStateSerialization: CKSyncEngine.State.Serialization?
     private var ledgerSnapshotTracker = CloudSaveLedgerSnapshotTracker()
     private var lifecycleGeneration = 0
@@ -443,7 +444,7 @@ extension CloudSaveEngine {
         )
     }
 
-    /// Clears the failed engine after every earlier checkpoint write completes.
+    /// Detaches the failed engine after every earlier checkpoint write completes.
     fileprivate func finishHostFailureInvalidation(
         _ failure: CloudSaveFailure,
         lifecycleGeneration: Int,
@@ -458,6 +459,7 @@ extension CloudSaveEngine {
             storedSyncEngine === syncEngine
         else {
             CloudSaveLogging.log("host failure | ignored superseded invalidation")
+            endHostFailureInvalidation()
             return false
         }
 
@@ -470,10 +472,29 @@ extension CloudSaveEngine {
         return true
     }
 
-    /// Prevents explicit recovery from overtaking an invalidation waiting on checkpoint writes.
+    /// Prevents explicit recovery from overtaking checkpoint ordering or failed-engine shutdown.
     fileprivate func waitForPendingHostFailureInvalidation() async {
-        while isHostFailureInvalidationPending {
-            await statePersistenceLock.withLock {}
+        guard isHostFailureInvalidationPending else {
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            guard isHostFailureInvalidationPending else {
+                continuation.resume()
+                return
+            }
+
+            hostFailureInvalidationWaiters.append(continuation)
+        }
+    }
+
+    /// Releases explicit recovery only after the failed engine has stopped.
+    fileprivate func endHostFailureInvalidation() {
+        isHostFailureInvalidationPending = false
+        let waiters = hostFailureInvalidationWaiters
+        hostFailureInvalidationWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
         }
     }
 }
@@ -1001,6 +1022,7 @@ extension CloudSaveEngine {
         }
 
         await invalidation.engineToCancel?.cancelOperations()
+        endHostFailureInvalidation()
         await client.handle(
             failure: failure,
             recordID: nil

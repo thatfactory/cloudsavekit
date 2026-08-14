@@ -33,6 +33,7 @@ struct CloudSaveStateMachine: Sendable {
         }
 
         let generation = operationGenerations[operation, default: 0]
+        let hasActiveOperations = activeOperationCounts[operation] != nil
         failures.removeAll { requirement in
             guard requirement.context == .operation(operation) else {
                 return false
@@ -42,7 +43,7 @@ struct CloudSaveStateMachine: Sendable {
                 return false
             }
 
-            return generation >= minimumRecoveryGeneration
+            return !hasActiveOperations && generation >= minimumRecoveryGeneration
         }
     }
 

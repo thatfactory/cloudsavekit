@@ -55,6 +55,30 @@ struct CloudSaveStateMachineTests {
         )
     }
 
+    @Test("Does not let an older overlapping completion satisfy recovery")
+    func requiresRecoveryOperationAndOverlappingOperationsToComplete() {
+        var stateMachine = CloudSaveStateMachine()
+
+        stateMachine.begin(.fetching)
+        stateMachine.begin(.fetching)
+        stateMachine.fail(
+            .restricted,
+            operation: .fetching
+        )
+        stateMachine.complete(.fetching)
+
+        stateMachine.begin(.fetching)
+        stateMachine.complete(.fetching)
+        #expect(
+            stateMachine.status(hasPendingChanges: false) == .failed(.restricted)
+        )
+
+        stateMachine.complete(.fetching)
+        #expect(
+            stateMachine.status(hasPendingChanges: false) == .ready(hasPendingChanges: false)
+        )
+    }
+
     @Test("Resolves record failures independently")
     func resolvesRecordFailuresIndependently() {
         let firstRecordID = Self.makeRecordID(named: "first")
