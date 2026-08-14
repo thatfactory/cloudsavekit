@@ -51,6 +51,13 @@ struct CloudSaveStateMachine: Sendable {
         activeOperationCounts.removeAll()
     }
 
+    /// Discards state scoped to the previous iCloud account after a known account transition.
+    mutating func resetForAccountChange() {
+        activeOperationCounts.removeAll()
+        failures.removeAll()
+        operationGenerations.removeAll()
+    }
+
     /// Records a failure for a host, record, or zone work item.
     mutating func fail(
         _ failure: CloudSaveFailure,

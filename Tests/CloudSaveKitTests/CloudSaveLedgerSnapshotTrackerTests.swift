@@ -108,7 +108,7 @@ struct CloudSaveLedgerSnapshotTrackerTests {
         #expect(tracker.completeSnapshot(snapshot) == [.remove(.save(recordID))])
     }
 
-    @Test("Preserves enqueue and acknowledgement order for one record")
+    @Test("Preserves enqueue and explicit removal order for one record")
     func preservesMutationOrder() {
         let recordID = Self.makeRecordID(named: "ordered")
         let change = CloudSavePendingChange.save(recordID)

@@ -123,6 +123,34 @@ struct CloudSaveStateMachineTests {
         )
     }
 
+    @Test("Clears previous-account activity and recovery state")
+    func resetsPreviousAccountState() {
+        let recordID = Self.makeRecordID(named: "previous-account")
+        var stateMachine = CloudSaveStateMachine()
+
+        stateMachine.begin(.fetching)
+        stateMachine.fail(
+            .recordConflict,
+            context: .record(recordID)
+        )
+        stateMachine.fail(
+            .zoneUnavailable,
+            context: .zone(Self.zoneID)
+        )
+        stateMachine.fail(
+            .localPersistence,
+            context: .hostPersistence
+        )
+
+        stateMachine.resetForAccountChange()
+
+        #expect(!stateMachine.requiresHostRecovery)
+        #expect(!stateMachine.requiresRecovery(for: Self.zoneID))
+        #expect(
+            stateMachine.status(hasPendingChanges: false) == .ready(hasPendingChanges: false)
+        )
+    }
+
     @Test("Reconciles record failures against the host durable ledger")
     func reconcilesRecordFailures() {
         let retainedRecordID = Self.makeRecordID(named: "retained")

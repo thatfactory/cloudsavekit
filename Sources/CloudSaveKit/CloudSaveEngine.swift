@@ -529,7 +529,26 @@ extension CloudSaveEngine {
         )
     }
 
-    /// Removes acknowledged host-ledger entries from snapshots and the active engine.
+    /// Reconciles successful work against the host ledger without discarding a newer mutation.
+    fileprivate func reconcileAcknowledgedPendingChanges(
+        _ acknowledgedChanges: [CloudSavePendingChange],
+        syncEngine: CKSyncEngine
+    ) async throws {
+        let snapshot = try await readPendingChangesSnapshot()
+        let completedChanges = acknowledgedChanges.filter {
+            !snapshot.containsEffectiveChange($0)
+        }
+
+        ledgerSnapshotTracker.recordRemovals(completedChanges)
+        restoreDurablePendingChanges(
+            snapshot,
+            syncEngine: syncEngine
+        )
+        stateMachine.resolve(recordIDs: acknowledgedChanges.map(\.recordID))
+        publishStatus(syncEngine: syncEngine)
+    }
+
+    /// Discards a pending change that the host can no longer materialize.
     fileprivate func removePendingChanges(
         _ changes: [CloudSavePendingChange],
         syncEngine: CKSyncEngine
@@ -566,6 +585,8 @@ extension CloudSaveEngine {
         _ accountChange: CloudSaveAccountChange,
         syncEngine: CKSyncEngine
     ) async throws {
+        stateMachine.resetForAccountChange()
+
         guard case .signedOut = accountChange else {
             let ledgerSnapshot = try await readPendingChangesSnapshot()
             syncEngine.state.add(
@@ -578,6 +599,8 @@ extension CloudSaveEngine {
             publishStatus(syncEngine: syncEngine)
             return
         }
+
+        publishStatus(syncEngine: nil)
     }
 
     /// Recreates the configured zone and restores the host's durable changes after deletion.
@@ -663,12 +686,12 @@ extension CloudSaveEngine {
         let deletedRecordIDs = event.deletedRecordIDs.filter(isInConfiguredZone)
 
         try await client.didSave(records: savedRecords)
-        removePendingChanges(
+        try await reconcileAcknowledgedPendingChanges(
             savedRecords.map { .save($0.recordID) },
             syncEngine: syncEngine
         )
         try await client.didDelete(recordIDs: deletedRecordIDs)
-        removePendingChanges(
+        try await reconcileAcknowledgedPendingChanges(
             deletedRecordIDs.map(CloudSavePendingChange.delete),
             syncEngine: syncEngine
         )
@@ -709,7 +732,7 @@ extension CloudSaveEngine {
             switch error.code {
             case .unknownItem, .zoneNotFound:
                 try await client.didDelete(recordIDs: [recordID])
-                removePendingChanges(
+                try await reconcileAcknowledgedPendingChanges(
                     [.delete(recordID)],
                     syncEngine: syncEngine
                 )
@@ -762,7 +785,7 @@ extension CloudSaveEngine {
                 records: [serverRecord],
                 deletedRecordIDs: []
             )
-            removePendingChanges(
+            try await reconcileAcknowledgedPendingChanges(
                 [.save(recordID)],
                 syncEngine: syncEngine
             )
