@@ -1,19 +1,26 @@
 import CloudKit
 import Foundation
 
-/// Retains ordered enqueues that occur while the host produces a durable-ledger snapshot.
+/// Versions host-ledger snapshots and retains ordered mutations that race with their reads.
 struct CloudSaveLedgerSnapshotTracker: Sendable {
     private var activeSnapshots: [Snapshot] = []
     private var ledgerMutations: [TrackedMutation] = []
     private var latestGeneration = 0
+    private var latestInvalidationGeneration = 0
     private var nextIdentifier = 0
+
+    /// The latest boundary established before an authoritative host-ledger mutation.
+    var currentGeneration: Int {
+        latestInvalidationGeneration
+    }
 
     /// Begins tracking changes that can race with one host-ledger read.
     mutating func beginSnapshot() -> Snapshot {
         nextIdentifier &+= 1
         let snapshot = Snapshot(
             generation: latestGeneration,
-            identifier: nextIdentifier
+            identifier: nextIdentifier,
+            invalidationGeneration: latestInvalidationGeneration
         )
         activeSnapshots.append(snapshot)
         return snapshot
@@ -29,10 +36,20 @@ struct CloudSaveLedgerSnapshotTracker: Sendable {
         record(changes.map(CloudSaveLedgerMutation.remove))
     }
 
+    /// Invalidates snapshots that could predate an authoritative host-ledger mutation.
+    mutating func invalidateSnapshotsForHostMutation() {
+        latestInvalidationGeneration &+= 1
+    }
+
     /// Completes a snapshot and returns ledger mutations committed after its read began.
-    mutating func completeSnapshot(_ snapshot: Snapshot) -> [CloudSaveLedgerMutation] {
+    mutating func completeSnapshot(_ snapshot: Snapshot) -> [CloudSaveLedgerMutation]? {
         guard remove(snapshot) else {
-            return []
+            return nil
+        }
+
+        guard snapshot.invalidationGeneration == latestInvalidationGeneration else {
+            pruneMutationsNoLongerNeeded()
+            return nil
         }
 
         let mutations: [CloudSaveLedgerMutation] = ledgerMutations.compactMap { trackedMutation in
@@ -63,6 +80,7 @@ extension CloudSaveLedgerSnapshotTracker {
     struct Snapshot: Equatable, Sendable {
         fileprivate let generation: Int
         fileprivate let identifier: Int
+        fileprivate let invalidationGeneration: Int
     }
 }
 

@@ -12,6 +12,7 @@ struct CloudSavePendingChangesSnapshotTests {
         )
         let snapshot = CloudSavePendingChangesSnapshot(
             lifecycleGeneration: 1,
+            ledgerGeneration: 1,
             durableChanges: [],
             subsequentMutations: [.enqueue(save)]
         )
@@ -26,6 +27,7 @@ struct CloudSavePendingChangesSnapshotTests {
         )
         let snapshot = CloudSavePendingChangesSnapshot(
             lifecycleGeneration: 1,
+            ledgerGeneration: 1,
             durableChanges: [save],
             subsequentMutations: [.remove(save)]
         )
@@ -40,6 +42,7 @@ struct CloudSavePendingChangesSnapshotTests {
         let delete = CloudSavePendingChange.delete(recordID)
         let snapshot = CloudSavePendingChangesSnapshot(
             lifecycleGeneration: 1,
+            ledgerGeneration: 1,
             durableChanges: [save],
             subsequentMutations: [
                 .enqueue(delete),
@@ -55,12 +58,14 @@ struct CloudSavePendingChangesSnapshotTests {
     func rejectsPreviousLifecycle() {
         let snapshot = CloudSavePendingChangesSnapshot(
             lifecycleGeneration: 7,
+            ledgerGeneration: 11,
             durableChanges: [],
             subsequentMutations: []
         )
 
-        #expect(snapshot.belongs(to: 7))
-        #expect(!snapshot.belongs(to: 8))
+        #expect(snapshot.belongs(to: 7, ledgerGeneration: 11))
+        #expect(!snapshot.belongs(to: 8, ledgerGeneration: 11))
+        #expect(!snapshot.belongs(to: 7, ledgerGeneration: 12))
     }
 }
 

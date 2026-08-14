@@ -79,7 +79,7 @@ struct CloudSaveLedgerSnapshotTrackerTests {
         tracker.recordEnqueues([change])
         let snapshot = tracker.beginSnapshot()
 
-        #expect(tracker.completeSnapshot(snapshot).isEmpty)
+        #expect(tracker.completeSnapshot(snapshot) == [])
     }
 
     @Test("Cancelling one ledger read keeps changes needed by an older read")
@@ -122,6 +122,19 @@ struct CloudSaveLedgerSnapshotTrackerTests {
             tracker.completeSnapshot(snapshot)
                 == [.enqueue(change), .remove(change)]
         )
+    }
+
+    @Test("Invalidates a ledger read that predates an authoritative host commit")
+    func invalidatesSnapshotAcrossHostCommit() {
+        var tracker = CloudSaveLedgerSnapshotTracker()
+
+        let staleSnapshot = tracker.beginSnapshot()
+        tracker.invalidateSnapshotsForHostMutation()
+        let currentSnapshot = tracker.beginSnapshot()
+
+        #expect(tracker.completeSnapshot(staleSnapshot) == nil)
+        #expect(tracker.completeSnapshot(currentSnapshot) == [])
+        #expect(tracker.currentGeneration == 1)
     }
 }
 

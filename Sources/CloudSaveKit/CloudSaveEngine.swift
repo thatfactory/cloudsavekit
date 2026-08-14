@@ -9,6 +9,7 @@ public final actor CloudSaveEngine {
     private let client: any CloudSaveClient
     private let configuration: CloudSaveConfiguration
     private let eventHandlingLock = CloudSaveAsyncLock()
+    private let ledgerPersistenceLock = CloudSaveAsyncLock()
     private let statePersistenceLock = CloudSaveAsyncLock()
     private let statusContinuation: AsyncStream<CloudSaveStatus>.Continuation
     private var isAccountTransitionPending = false
@@ -279,11 +280,21 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
 
             return context.options.scope.contains($0) && isInConfiguredZone(recordID)
         }
+        let batchLifecycleGeneration = lifecycleGeneration
 
-        return await CKSyncEngine.RecordZoneChangeBatch(
+        let batch = await CKSyncEngine.RecordZoneChangeBatch(
             pendingChanges: pendingChanges
         ) { [client, weak self] recordID in
             let record = await client.record(for: recordID)
+            guard
+                await self?.isActive(
+                    syncEngine: syncEngine,
+                    lifecycleGeneration: batchLifecycleGeneration
+                ) == true
+            else {
+                return nil
+            }
+
             if record == nil {
                 await self?.reconcileUnavailablePendingSave(
                     recordID,
@@ -292,6 +303,16 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
             }
             return record
         }
+        guard
+            isActive(
+                syncEngine: syncEngine,
+                lifecycleGeneration: batchLifecycleGeneration
+            )
+        else {
+            return nil
+        }
+
+        return batch
     }
 }
 
@@ -328,10 +349,14 @@ extension CloudSaveEngine {
                     syncEngine: syncEngine
                 )
             case .fetchedRecordZoneChanges(let event):
-                try await client.applyFetchedChanges(
-                    records: event.modifications.map(\.record).filter(isInConfiguredZone),
-                    deletedRecordIDs: event.deletions.map(\.recordID).filter(isInConfiguredZone)
-                )
+                let fetchedRecords = event.modifications.map(\.record).filter(isInConfiguredZone)
+                let deletedRecordIDs = event.deletions.map(\.recordID).filter(isInConfiguredZone)
+                try await commitPendingChangesMutation { [client] in
+                    try await client.applyFetchedChanges(
+                        records: fetchedRecords,
+                        deletedRecordIDs: deletedRecordIDs
+                    )
+                }
             case .sentRecordZoneChanges(let event):
                 try await handleSentRecordZoneChanges(
                     event,
@@ -377,6 +402,17 @@ extension CloudSaveEngine {
     /// Whether account-scoped persistence or failed-engine shutdown blocks new work.
     fileprivate var isLifecycleTransitionPending: Bool {
         isAccountTransitionPending || isHostFailureInvalidationPending
+    }
+
+    /// Returns whether asynchronous work still belongs to the active engine lifecycle.
+    fileprivate func isActive(
+        syncEngine: CKSyncEngine,
+        lifecycleGeneration: Int
+    ) -> Bool {
+        !isLifecycleTransitionPending
+            && self.lifecycleGeneration == lifecycleGeneration
+            && storedSyncEngine === syncEngine
+            && !stateMachine.requiresHostRecovery
     }
 
     /// Creates a CKSyncEngine from the last state successfully persisted by the host.
@@ -575,21 +611,40 @@ extension CloudSaveEngine {
 extension CloudSaveEngine {
     /// Reads the host ledger while retaining every mutation that can race with its snapshot.
     fileprivate func readPendingChangesSnapshot() async throws -> CloudSavePendingChangesSnapshot {
-        let snapshot = ledgerSnapshotTracker.beginSnapshot()
-        let snapshotLifecycleGeneration = lifecycleGeneration
+        while true {
+            try Task.checkCancellation()
+            let snapshot = ledgerSnapshotTracker.beginSnapshot()
+            let snapshotLifecycleGeneration = lifecycleGeneration
 
-        do {
-            let durableChanges = try await client.pendingChanges()
-            let subsequentMutations = ledgerSnapshotTracker.completeSnapshot(snapshot)
-            return CloudSavePendingChangesSnapshot(
-                lifecycleGeneration: snapshotLifecycleGeneration,
-                durableChanges: durableChanges,
-                subsequentMutations: subsequentMutations
-            )
-        } catch {
-            ledgerSnapshotTracker.cancelSnapshot(snapshot)
-            throw error
+            do {
+                let durableChanges = try await ledgerPersistenceLock.withLock { [client] in
+                    try await client.pendingChanges()
+                }
+                guard
+                    let subsequentMutations = ledgerSnapshotTracker.completeSnapshot(snapshot)
+                else {
+                    continue
+                }
+
+                return CloudSavePendingChangesSnapshot(
+                    lifecycleGeneration: snapshotLifecycleGeneration,
+                    ledgerGeneration: ledgerSnapshotTracker.currentGeneration,
+                    durableChanges: durableChanges,
+                    subsequentMutations: subsequentMutations
+                )
+            } catch {
+                ledgerSnapshotTracker.cancelSnapshot(snapshot)
+                throw error
+            }
         }
+    }
+
+    /// Serializes a host ledger mutation and invalidates snapshots from before its commit.
+    fileprivate func commitPendingChangesMutation<Result: Sendable>(
+        _ operation: @Sendable () async throws -> Result
+    ) async rethrows -> Result {
+        ledgerSnapshotTracker.invalidateSnapshotsForHostMutation()
+        return try await ledgerPersistenceLock.withLock(operation)
     }
 
     /// Persists an opaque state update before accepting it as the next recovery checkpoint.
@@ -765,7 +820,10 @@ extension CloudSaveEngine {
     ) -> Bool {
         !isHostFailureInvalidationPending
             && (allowsAccountTransition || !isAccountTransitionPending)
-            && snapshot.belongs(to: lifecycleGeneration)
+            && snapshot.belongs(
+                to: lifecycleGeneration,
+                ledgerGeneration: ledgerSnapshotTracker.currentGeneration
+            )
             && storedSyncEngine === syncEngine
             && !stateMachine.requiresHostRecovery
     }
@@ -844,7 +902,9 @@ extension CloudSaveEngine {
             return
         }
 
-        try await client.applyDeletedZones(configuredZoneIDs)
+        try await commitPendingChangesMutation { [client] in
+            try await client.applyDeletedZones(configuredZoneIDs)
+        }
         let ledgerSnapshot = try await readPendingChangesSnapshot()
         syncEngine.state.add(
             pendingDatabaseChanges: [.saveZone(configuration.zone)]
@@ -880,7 +940,9 @@ extension CloudSaveEngine {
         needsAccountTransitionLedgerRefresh = false
         lifecycleGeneration &+= 1
         let accountLifecycleGeneration = lifecycleGeneration
-        try await client.handle(accountChange: accountChange)
+        try await commitPendingChangesMutation { [client] in
+            try await client.handle(accountChange: accountChange)
+        }
         guard lifecycleGeneration == accountLifecycleGeneration,
             isAccountTransitionPending,
             !isHostFailureInvalidationPending,
@@ -937,12 +999,16 @@ extension CloudSaveEngine {
         let savedRecords = event.savedRecords.filter(isInConfiguredZone)
         let deletedRecordIDs = event.deletedRecordIDs.filter(isInConfiguredZone)
 
-        try await client.didSave(records: savedRecords)
+        try await commitPendingChangesMutation { [client] in
+            try await client.didSave(records: savedRecords)
+        }
         try await reconcileAcknowledgedPendingChanges(
             savedRecords.map { .save($0.recordID) },
             syncEngine: syncEngine
         )
-        try await client.didDelete(recordIDs: deletedRecordIDs)
+        try await commitPendingChangesMutation { [client] in
+            try await client.didDelete(recordIDs: deletedRecordIDs)
+        }
         try await reconcileAcknowledgedPendingChanges(
             deletedRecordIDs.map(CloudSavePendingChange.delete),
             syncEngine: syncEngine
@@ -983,7 +1049,9 @@ extension CloudSaveEngine {
         for (recordID, error) in event.failedRecordDeletes where isInConfiguredZone(recordID) {
             switch error.code {
             case .unknownItem, .zoneNotFound:
-                try await client.didDelete(recordIDs: [recordID])
+                try await commitPendingChangesMutation { [client] in
+                    try await client.didDelete(recordIDs: [recordID])
+                }
                 try await reconcileAcknowledgedPendingChanges(
                     [.delete(recordID)],
                     syncEngine: syncEngine
@@ -1033,16 +1101,21 @@ extension CloudSaveEngine {
 
         switch try await client.resolve(conflict: conflict) {
         case .acceptServer:
-            try await client.applyFetchedChanges(
-                records: [serverRecord],
-                deletedRecordIDs: []
-            )
+            try await commitPendingChangesMutation { [client] in
+                try await client.applyFetchedChanges(
+                    records: [serverRecord],
+                    deletedRecordIDs: []
+                )
+            }
             try await reconcileAcknowledgedPendingChanges(
                 [.save(recordID)],
                 syncEngine: syncEngine
             )
         case .retry(let mergedRecord):
-            try await client.persistResolvedRecord(mergedRecord)
+            try await commitPendingChangesMutation { [client] in
+                try await client.persistResolvedRecord(mergedRecord)
+            }
+            ledgerSnapshotTracker.recordEnqueues([.save(mergedRecord.recordID)])
             changesToRetry.append(.saveRecord(mergedRecord.recordID))
         case .requiresUserDecision:
             await reportFailure(

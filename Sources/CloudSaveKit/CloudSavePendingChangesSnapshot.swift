@@ -5,6 +5,9 @@ struct CloudSavePendingChangesSnapshot: Sendable {
     /// The engine lifecycle generation in which the host-ledger read began.
     let lifecycleGeneration: Int
 
+    /// The authoritative host-ledger generation in which the read completed.
+    let ledgerGeneration: Int
+
     /// The authoritative pending changes returned by the host.
     let durableChanges: [CloudSavePendingChange]
 
@@ -15,9 +18,13 @@ struct CloudSavePendingChangesSnapshot: Sendable {
 // MARK: - Effective Changes
 
 extension CloudSavePendingChangesSnapshot {
-    /// Returns whether the snapshot was read during the specified engine lifecycle.
-    func belongs(to expectedLifecycleGeneration: Int) -> Bool {
+    /// Returns whether the snapshot belongs to the specified engine and host-ledger generations.
+    func belongs(
+        to expectedLifecycleGeneration: Int,
+        ledgerGeneration expectedLedgerGeneration: Int
+    ) -> Bool {
         lifecycleGeneration == expectedLifecycleGeneration
+            && ledgerGeneration == expectedLedgerGeneration
     }
 
     /// Returns whether reconciliation leaves one exact change pending.
