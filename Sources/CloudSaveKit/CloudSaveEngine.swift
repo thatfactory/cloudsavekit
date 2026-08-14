@@ -3,13 +3,14 @@ import Foundation
 
 /// Synchronizes an application's durable local records with a private CloudKit database.
 public final actor CloudSaveEngine {
-    /// A stream of privacy-safe synchronization status updates.
+    /// A stream that retains the latest unconsumed privacy-safe synchronization status.
     public nonisolated let statusUpdates: AsyncStream<CloudSaveStatus>
 
     private let client: any CloudSaveClient
     private let configuration: CloudSaveConfiguration
     private let statusContinuation: AsyncStream<CloudSaveStatus>.Continuation
     private var lastPersistedStateSerialization: CKSyncEngine.State.Serialization?
+    private var ledgerSnapshotTracker = CloudSaveLedgerSnapshotTracker()
     private var lifecycleGeneration = 0
     private var stateMachine = CloudSaveStateMachine()
     private var storedSyncEngine: CKSyncEngine?
@@ -19,9 +20,9 @@ public final actor CloudSaveEngine {
         configuration: CloudSaveConfiguration,
         client: any CloudSaveClient
     ) {
-        let stream = AsyncStream.makeStream(of: CloudSaveStatus.self)
-        statusUpdates = stream.stream
-        statusContinuation = stream.continuation
+        let statusChannel = CloudSaveStatusChannel()
+        statusUpdates = statusChannel.stream
+        statusContinuation = statusChannel.continuation
         self.client = client
         self.configuration = configuration
         lastPersistedStateSerialization = configuration.stateSerialization
@@ -34,9 +35,9 @@ public final actor CloudSaveEngine {
     /// Initializes CKSyncEngine and restores every locally durable pending change.
     public func start() async throws {
         let startingLifecycleGeneration = lifecycleGeneration
-        let pendingChanges: [CloudSavePendingChange]
+        let ledgerSnapshot: CloudSavePendingChangesSnapshot
         do {
-            pendingChanges = try await client.pendingChanges()
+            ledgerSnapshot = try await readPendingChangesSnapshot()
         } catch {
             await handleHostFailure(
                 error,
@@ -60,15 +61,22 @@ public final actor CloudSaveEngine {
         }
 
         restoreDurablePendingChanges(
-            pendingChanges,
+            ledgerSnapshot,
             syncEngine: engine
         )
         publishStatus(syncEngine: engine)
-        CloudSaveLogging.log("start | pending=\(pendingChanges.count)")
+        CloudSaveLogging.log(
+            "start | pending=\(ledgerSnapshot.durableChanges.count)"
+        )
     }
 
     /// Adds locally durable changes to CKSyncEngine's pending state.
     public func enqueue(_ changes: [CloudSavePendingChange]) {
+        let configuredChanges = changes.filter {
+            isInConfiguredZone($0.recordID)
+        }
+        ledgerSnapshotTracker.record(configuredChanges)
+
         guard !stateMachine.requiresHostRecovery else {
             CloudSaveLogging.log(
                 level: .error,
@@ -85,9 +93,6 @@ public final actor CloudSaveEngine {
             return
         }
 
-        let configuredChanges = changes.filter {
-            isInConfiguredZone($0.recordID)
-        }
         storedSyncEngine.state.add(
             pendingRecordZoneChanges: configuredChanges.map(\.syncEngineChange)
         )
@@ -128,10 +133,10 @@ public final actor CloudSaveEngine {
     /// Immediately sends every locally durable pending change for the configured save zone.
     public func sendNow() async throws {
         let session = try operationalSyncEngine()
-        let pendingChanges: [CloudSavePendingChange]
+        let ledgerSnapshot: CloudSavePendingChangesSnapshot
 
         do {
-            pendingChanges = try await client.pendingChanges()
+            ledgerSnapshot = try await readPendingChangesSnapshot()
         } catch {
             try throwRecoveryErrorIfNeeded(for: session)
             await handleHostFailure(
@@ -143,7 +148,7 @@ public final actor CloudSaveEngine {
 
         try validate(session)
         restoreDurablePendingChanges(
-            pendingChanges,
+            ledgerSnapshot,
             syncEngine: session.syncEngine
         )
         restoreFailedZoneChangeIfNeeded(syncEngine: session.syncEngine)
@@ -380,6 +385,23 @@ extension CloudSaveEngine {
 // MARK: - Private Host Persistence
 
 extension CloudSaveEngine {
+    /// Reads the host ledger while retaining every enqueue that can race with its snapshot.
+    fileprivate func readPendingChangesSnapshot() async throws -> CloudSavePendingChangesSnapshot {
+        let snapshot = ledgerSnapshotTracker.beginSnapshot()
+
+        do {
+            let durableChanges = try await client.pendingChanges()
+            let subsequentlyEnqueuedChanges = ledgerSnapshotTracker.completeSnapshot(snapshot)
+            return CloudSavePendingChangesSnapshot(
+                durableChanges: durableChanges,
+                subsequentlyEnqueuedChanges: subsequentlyEnqueuedChanges
+            )
+        } catch {
+            ledgerSnapshotTracker.cancelSnapshot(snapshot)
+            throw error
+        }
+    }
+
     /// Persists an opaque state update before accepting it as the next recovery checkpoint.
     fileprivate func persistStateUpdate(
         _ event: CKSyncEngine.Event.StateUpdate
@@ -392,13 +414,16 @@ extension CloudSaveEngine {
 
     /// Reconciles CKSyncEngine's tracked changes with the host's authoritative durable ledger.
     fileprivate func restoreDurablePendingChanges(
-        _ pendingChanges: [CloudSavePendingChange],
+        _ snapshot: CloudSavePendingChangesSnapshot,
         syncEngine: CKSyncEngine
     ) {
-        let configuredPendingChanges = pendingChanges.filter {
+        let configuredDurableChanges = snapshot.durableChanges.filter {
             isInConfiguredZone($0.recordID)
         }
-        let durableChanges = configuredPendingChanges.map(\.syncEngineChange)
+        let configuredSubsequentChanges = snapshot.subsequentlyEnqueuedChanges.filter {
+            isInConfiguredZone($0.recordID)
+        }
+        let durableChanges = configuredDurableChanges.map(\.syncEngineChange)
         let durableChangeSet = Set(durableChanges)
         let staleChanges = syncEngine.state.pendingRecordZoneChanges.filter {
             guard let recordID = $0.recordID else {
@@ -414,8 +439,13 @@ extension CloudSaveEngine {
         syncEngine.state.add(
             pendingRecordZoneChanges: durableChanges
         )
+        syncEngine.state.add(
+            pendingRecordZoneChanges: configuredSubsequentChanges.map(\.syncEngineChange)
+        )
         stateMachine.reconcilePendingRecordIDs(
-            Set(configuredPendingChanges.map(\.recordID)),
+            Set(
+                (configuredDurableChanges + configuredSubsequentChanges).map(\.recordID)
+            ),
             in: configuration.zone.zoneID
         )
     }
@@ -437,12 +467,12 @@ extension CloudSaveEngine {
         syncEngine: CKSyncEngine
     ) async throws {
         guard case .signedOut = accountChange else {
-            let pendingChanges = try await client.pendingChanges()
+            let ledgerSnapshot = try await readPendingChangesSnapshot()
             syncEngine.state.add(
                 pendingDatabaseChanges: [.saveZone(configuration.zone)]
             )
             restoreDurablePendingChanges(
-                pendingChanges,
+                ledgerSnapshot,
                 syncEngine: syncEngine
             )
             publishStatus(syncEngine: syncEngine)
@@ -461,12 +491,12 @@ extension CloudSaveEngine {
         }
 
         try await client.applyDeletedZones(configuredZoneIDs)
-        let pendingChanges = try await client.pendingChanges()
+        let ledgerSnapshot = try await readPendingChangesSnapshot()
         syncEngine.state.add(
             pendingDatabaseChanges: [.saveZone(configuration.zone)]
         )
         restoreDurablePendingChanges(
-            pendingChanges,
+            ledgerSnapshot,
             syncEngine: syncEngine
         )
     }

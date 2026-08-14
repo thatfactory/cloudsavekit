@@ -79,7 +79,9 @@ Automatic synchronization should remain enabled in production. Explicit operatio
 
 Call `start()` successfully before any explicit synchronization. `fetchNow()` and `sendNow()` throw `CloudSaveEngineError.notStarted` before startup and `CloudSaveEngineError.hostRecoveryRequired` after a host persistence callback fails. Once the local store is healthy again, call `start()` to rebuild from the last successfully persisted CKSyncEngine checkpoint and the host's current durable pending-change ledger.
 
-`sendNow()` reloads that ledger before sending. This makes the host the source of truth if CKSyncEngine discarded a semantic failure or if a previously persisted checkpoint still contains a change the host has since acknowledged.
+`sendNow()` reloads that ledger before sending. This makes the host the source of truth if CKSyncEngine discarded a semantic failure or if a previously persisted checkpoint still contains a change the host has since acknowledged. If the host commits and enqueues newer changes while a ledger read is suspended, CloudSaveKit replays those enqueues in their original order after reconciling the returned snapshot.
+
+`statusUpdates` is a current-state projection, not an event history. It retains only the latest unconsumed status so an absent or slow observer cannot accumulate an unbounded buffer.
 
 ## Failure and retry policy
 
