@@ -1,0 +1,101 @@
+---
+name: Release
+run-name: Release ${{ github.event.release.tag_name }}
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test Release
+    runs-on: [self-hosted, macOS]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+        with:
+          clean: true
+
+      - name: Run Tests
+        run: swift test -v
+
+  build_docs:
+    name: Build DocC
+    runs-on: [self-hosted, macOS]
+    needs: test
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+        with:
+          clean: true
+
+      - name: Generate DocC
+        run: |
+          set -euo pipefail
+          swift package --allow-writing-to-directory ./public generate-documentation \
+            --target CloudSaveKit \
+            --disable-indexing \
+            --output-path ./public \
+            --transform-for-static-hosting \
+            --hosting-base-path cloudsavekit
+
+          cat > ./public/index.html <<'INDEX'
+          <!doctype html>
+          <meta http-equiv="refresh" content="0; url=/cloudsavekit/documentation/cloudsavekit/" />
+          <title>CloudSaveKit Documentation</title>
+          INDEX
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ./public
+          name: github-pages
+
+  deploy_docs:
+    name: Deploy DocC
+    needs: build_docs
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
+
+  notify_package_collection:
+    name: Notify Package Collection
+    runs-on: ubuntu-latest
+    needs: deploy_docs
+    steps:
+      - name: Trigger Swift Package Collection Rebuild
+        env:
+          COLLECTION_REPO: thatfactory/swift-package-collection
+          WORKFLOW_FILE: publish.yml
+          REF: main
+          GH_TOKEN: ${{ secrets.COLLECTION_TRIGGER_TOKEN }}
+          SOURCE_REPO: ${{ github.repository }}
+          SOURCE_VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "Missing COLLECTION_TRIGGER_TOKEN secret"
+            exit 1
+          fi
+
+          curl -sS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$COLLECTION_REPO/actions/workflows/$WORKFLOW_FILE/dispatches" \
+            -d "{\"ref\":\"$REF\",\"inputs\":{\"source_repo\":\"$SOURCE_REPO\",\"source_version\":\"$SOURCE_VERSION\"}}"
