@@ -11,11 +11,13 @@ public final actor CloudSaveEngine {
     private let eventHandlingLock = CloudSaveAsyncLock()
     private let statePersistenceLock = CloudSaveAsyncLock()
     private let statusContinuation: AsyncStream<CloudSaveStatus>.Continuation
+    private var isAccountTransitionPending = false
     private var isHostFailureInvalidationPending = false
-    private var hostFailureInvalidationWaiters: [CheckedContinuation<Void, Never>] = []
     private var lastPersistedStateSerialization: CKSyncEngine.State.Serialization?
     private var ledgerSnapshotTracker = CloudSaveLedgerSnapshotTracker()
+    private var lifecycleTransitionWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var lifecycleGeneration = 0
+    private var needsAccountTransitionLedgerRefresh = false
     private var stateMachine = CloudSaveStateMachine()
     private var storedSyncEngine: CKSyncEngine?
 
@@ -38,12 +40,16 @@ public final actor CloudSaveEngine {
 
     /// Initializes CKSyncEngine and restores every locally durable pending change.
     public func start() async throws {
-        await waitForPendingHostFailureInvalidation()
+        try await waitForPendingLifecycleTransition()
 
         let startingLifecycleGeneration = lifecycleGeneration
         let ledgerSnapshot: CloudSavePendingChangesSnapshot
         do {
             ledgerSnapshot = try await readPendingChangesSnapshot()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as CKError where error.code == .operationCancelled {
+            throw error
         } catch {
             await handleHostFailure(
                 error,
@@ -85,9 +91,22 @@ public final actor CloudSaveEngine {
         let configuredChanges = changes.filter {
             isInConfiguredZone($0.recordID)
         }
+        guard !configuredChanges.isEmpty else {
+            return
+        }
+
+        guard !isAccountTransitionPending else {
+            needsAccountTransitionLedgerRefresh = true
+            CloudSaveLogging.log(
+                level: .error,
+                "enqueue | ignored during account transition"
+            )
+            return
+        }
+
         ledgerSnapshotTracker.recordEnqueues(configuredChanges)
 
-        guard !isHostFailureInvalidationPending,
+        guard !isLifecycleTransitionPending,
             !stateMachine.requiresHostRecovery
         else {
             CloudSaveLogging.log(
@@ -114,6 +133,8 @@ public final actor CloudSaveEngine {
 
     /// Immediately fetches changes for the configured save zone.
     public func fetchNow() async throws {
+        try await waitForPendingLifecycleTransition()
+
         let session = try operationalSyncEngine()
 
         do {
@@ -144,11 +165,19 @@ public final actor CloudSaveEngine {
 
     /// Immediately sends every locally durable pending change for the configured save zone.
     public func sendNow() async throws {
+        try await waitForPendingLifecycleTransition()
+
         let session = try operationalSyncEngine()
         let ledgerSnapshot: CloudSavePendingChangesSnapshot
 
         do {
             ledgerSnapshot = try await readPendingChangesSnapshot()
+        } catch is CancellationError {
+            try throwRecoveryErrorIfNeeded(for: session)
+            throw CancellationError()
+        } catch let error as CKError where error.code == .operationCancelled {
+            try throwRecoveryErrorIfNeeded(for: session)
+            throw error
         } catch {
             try throwRecoveryErrorIfNeeded(for: session)
             await handleHostFailure(
@@ -236,7 +265,7 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
         _ context: CKSyncEngine.SendChangesContext,
         syncEngine: CKSyncEngine
     ) async -> CKSyncEngine.RecordZoneChangeBatch? {
-        guard !isHostFailureInvalidationPending,
+        guard !isLifecycleTransitionPending,
             storedSyncEngine === syncEngine,
             !stateMachine.requiresHostRecovery
         else {
@@ -274,7 +303,7 @@ extension CloudSaveEngine {
         _ event: CKSyncEngine.Event,
         syncEngine: CKSyncEngine
     ) async {
-        guard !isHostFailureInvalidationPending,
+        guard !isLifecycleTransitionPending,
             storedSyncEngine === syncEngine
         else {
             CloudSaveLogging.log("event | ignored stale engine")
@@ -345,6 +374,11 @@ extension CloudSaveEngine {
 // MARK: - Private Lifecycle
 
 extension CloudSaveEngine {
+    /// Whether account-scoped persistence or failed-engine shutdown blocks new work.
+    fileprivate var isLifecycleTransitionPending: Bool {
+        isAccountTransitionPending || isHostFailureInvalidationPending
+    }
+
     /// Creates a CKSyncEngine from the last state successfully persisted by the host.
     fileprivate func makeSyncEngine() -> CKSyncEngine {
         var engineConfiguration = CKSyncEngine.Configuration(
@@ -362,7 +396,7 @@ extension CloudSaveEngine {
         syncEngine: CKSyncEngine,
         lifecycleGeneration: Int
     ) {
-        guard !isHostFailureInvalidationPending,
+        guard !isLifecycleTransitionPending,
             !stateMachine.requiresHostRecovery
         else {
             throw CloudSaveEngineError.hostRecoveryRequired
@@ -385,7 +419,7 @@ extension CloudSaveEngine {
             lifecycleGeneration: Int
         )
     ) throws {
-        guard !isHostFailureInvalidationPending,
+        guard !isLifecycleTransitionPending,
             session.lifecycleGeneration == lifecycleGeneration,
             storedSyncEngine === session.syncEngine,
             !stateMachine.requiresHostRecovery
@@ -402,7 +436,7 @@ extension CloudSaveEngine {
         )
     ) throws {
         guard
-            isHostFailureInvalidationPending
+            isLifecycleTransitionPending
                 || session.lifecycleGeneration != lifecycleGeneration
                 || storedSyncEngine !== session.syncEngine
                 || stateMachine.requiresHostRecovery
@@ -431,6 +465,8 @@ extension CloudSaveEngine {
 
         let engineToCancel = syncEngine ?? storedSyncEngine
         isHostFailureInvalidationPending = true
+        isAccountTransitionPending = false
+        needsAccountTransitionLedgerRefresh = false
         lifecycleGeneration &+= 1
         stateMachine.fail(
             failure,
@@ -454,7 +490,6 @@ extension CloudSaveEngine {
             return false
         }
 
-        isHostFailureInvalidationPending = false
         guard self.lifecycleGeneration == lifecycleGeneration,
             storedSyncEngine === syncEngine
         else {
@@ -472,27 +507,63 @@ extension CloudSaveEngine {
         return true
     }
 
-    /// Prevents explicit recovery from overtaking checkpoint ordering or failed-engine shutdown.
-    fileprivate func waitForPendingHostFailureInvalidation() async {
-        guard isHostFailureInvalidationPending else {
+    /// Prevents explicit recovery from overtaking account changes or failed-engine shutdown.
+    fileprivate func waitForPendingLifecycleTransition() async throws {
+        try Task.checkCancellation()
+        guard isLifecycleTransitionPending else {
             return
         }
 
-        await withCheckedContinuation { continuation in
-            guard isHostFailureInvalidationPending else {
-                continuation.resume()
-                return
-            }
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
 
-            hostFailureInvalidationWaiters.append(continuation)
+                guard isLifecycleTransitionPending else {
+                    continuation.resume()
+                    return
+                }
+
+                lifecycleTransitionWaiters[waiterID] = continuation
+            }
+        } onCancel: {
+            Task { [weak self] in
+                await self?.cancelLifecycleTransitionWaiter(waiterID)
+            }
         }
+    }
+
+    /// Removes and cancels one operation waiting for a lifecycle transition.
+    fileprivate func cancelLifecycleTransitionWaiter(_ waiterID: UUID) {
+        lifecycleTransitionWaiters.removeValue(forKey: waiterID)?.resume(
+            throwing: CancellationError()
+        )
     }
 
     /// Releases explicit recovery only after the failed engine has stopped.
     fileprivate func endHostFailureInvalidation() {
         isHostFailureInvalidationPending = false
-        let waiters = hostFailureInvalidationWaiters
-        hostFailureInvalidationWaiters.removeAll()
+        resumeLifecycleTransitionWaitersIfReady()
+    }
+
+    /// Releases blocked work after the new account's durable ledger has been restored.
+    fileprivate func endAccountTransition() {
+        isAccountTransitionPending = false
+        resumeLifecycleTransitionWaitersIfReady()
+    }
+
+    /// Resumes lifecycle waiters only when no transition can expose scoped data.
+    fileprivate func resumeLifecycleTransitionWaitersIfReady() {
+        guard !isLifecycleTransitionPending else {
+            return
+        }
+
+        let waiters = Array(lifecycleTransitionWaiters.values)
+        lifecycleTransitionWaiters.removeAll()
         for waiter in waiters {
             waiter.resume()
         }
@@ -557,9 +628,16 @@ extension CloudSaveEngine {
     /// Reconciles CKSyncEngine's tracked changes with the host's authoritative durable ledger.
     fileprivate func restoreDurablePendingChanges(
         _ snapshot: CloudSavePendingChangesSnapshot,
-        syncEngine: CKSyncEngine
+        syncEngine: CKSyncEngine,
+        allowsAccountTransition: Bool = false
     ) -> Bool {
-        guard isCurrent(snapshot, syncEngine: syncEngine) else {
+        guard
+            isCurrent(
+                snapshot,
+                syncEngine: syncEngine,
+                allowsAccountTransition: allowsAccountTransition
+            )
+        else {
             CloudSaveLogging.log("ledger snapshot | ignored stale lifecycle")
             return false
         }
@@ -682,9 +760,11 @@ extension CloudSaveEngine {
     /// Returns whether a host-ledger snapshot still belongs to the active engine lifecycle.
     fileprivate func isCurrent(
         _ snapshot: CloudSavePendingChangesSnapshot,
-        syncEngine: CKSyncEngine
+        syncEngine: CKSyncEngine,
+        allowsAccountTransition: Bool = false
     ) -> Bool {
         !isHostFailureInvalidationPending
+            && (allowsAccountTransition || !isAccountTransitionPending)
             && snapshot.belongs(to: lifecycleGeneration)
             && storedSyncEngine === syncEngine
             && !stateMachine.requiresHostRecovery
@@ -716,7 +796,8 @@ extension CloudSaveEngine {
             guard
                 restoreDurablePendingChanges(
                     ledgerSnapshot,
-                    syncEngine: syncEngine
+                    syncEngine: syncEngine,
+                    allowsAccountTransition: true
                 )
             else {
                 throw CloudSaveEngineError.hostRecoveryRequired
@@ -726,6 +807,31 @@ extension CloudSaveEngine {
         }
 
         publishStatus(syncEngine: nil)
+    }
+
+    /// Reloads the new account's durable ledger when enqueues were blocked during its transition.
+    fileprivate func refreshPendingChangesAfterAccountTransitionIfNeeded(
+        _ accountChange: CloudSaveAccountChange,
+        syncEngine: CKSyncEngine
+    ) async throws {
+        if case .signedOut = accountChange {
+            needsAccountTransitionLedgerRefresh = false
+            return
+        }
+
+        while needsAccountTransitionLedgerRefresh {
+            needsAccountTransitionLedgerRefresh = false
+            let ledgerSnapshot = try await readPendingChangesSnapshot()
+            guard
+                restoreDurablePendingChanges(
+                    ledgerSnapshot,
+                    syncEngine: syncEngine,
+                    allowsAccountTransition: true
+                )
+            else {
+                throw CloudSaveEngineError.hostRecoveryRequired
+            }
+        }
     }
 
     /// Recreates the configured zone and restores the host's durable changes after deletion.
@@ -770,10 +876,13 @@ extension CloudSaveEngine {
             return
         }
 
+        isAccountTransitionPending = true
+        needsAccountTransitionLedgerRefresh = false
         lifecycleGeneration &+= 1
         let accountLifecycleGeneration = lifecycleGeneration
         try await client.handle(accountChange: accountChange)
         guard lifecycleGeneration == accountLifecycleGeneration,
+            isAccountTransitionPending,
             !isHostFailureInvalidationPending,
             !stateMachine.requiresHostRecovery,
             storedSyncEngine === syncEngine
@@ -784,6 +893,11 @@ extension CloudSaveEngine {
             accountChange,
             syncEngine: syncEngine
         )
+        try await refreshPendingChangesAfterAccountTransitionIfNeeded(
+            accountChange,
+            syncEngine: syncEngine
+        )
+        endAccountTransition()
     }
 
     /// Handles successful and failed configured-zone changes independently.

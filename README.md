@@ -83,13 +83,13 @@ Call `start()` successfully before any explicit synchronization. `fetchNow()` an
 
 Opaque CKSyncEngine checkpoint writes are serialized with host-failure lifecycle invalidation. A host callback failure blocks new work and advances the lifecycle immediately, while explicit `start()` recovery waits for every earlier checkpoint write and the failed engine's teardown. A replacement engine therefore cannot start from a checkpoint that an older engine later regresses through actor reentrancy.
 
-Known iCloud account transitions advance the engine lifecycle before the host switches accounts, invalidating every pre-transition ledger snapshot and explicit operation. They also clear operation and recovery state scoped to the previous account. Sign-out immediately publishes the cleared current status instead of leaving the previous account's pending or failed projection buffered.
+Known iCloud account transitions advance the engine lifecycle and block new synchronization before the host switches account-scoped persistence. The gate remains closed until the new account's durable pending ledger is restored, invalidating every pre-transition snapshot and explicit operation without allowing previous-account work to enter the new account. Transitions also clear operation and recovery state scoped to the previous account. Sign-out immediately publishes the cleared current status instead of leaving the previous account's pending or failed projection buffered.
 
 `statusUpdates` is a current-state projection, not an event history. It begins with `.idle` and retains only the latest unconsumed status so an absent or slow observer cannot accumulate an unbounded buffer.
 
 ## Failure and retry policy
 
-CloudSaveKit leaves temporary transport, service, authentication, throttling, and cancellation failures to CKSyncEngine's scheduler. Explicit methods still throw their underlying error so the caller can finish its immediate workflow, but routine retryable errors do not become durable attention-required state.
+CloudSaveKit leaves temporary transport, service, authentication, throttling, and cancellation failures to CKSyncEngine's scheduler. Explicit methods and their host-ledger preflight reads still throw their underlying cancellation so the caller can finish its immediate workflow, but routine retryable errors do not become durable attention-required state.
 
 Semantic and permanent failures are tracked independently:
 
