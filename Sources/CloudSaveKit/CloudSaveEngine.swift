@@ -11,6 +11,8 @@ public final actor CloudSaveEngine {
     private let statusContinuation: AsyncStream<CloudSaveStatus>.Continuation
     private var lastPersistedStateSerialization: CKSyncEngine.State.Serialization?
     private var pendingRecoveryOperation: RecoveryOperation?
+    private var requiredRecoveryOperation: RecoveryOperation?
+    private var requiresHostRecovery = false
     private var storedSyncEngine: CKSyncEngine?
     private var unresolvedFailure: CloudSaveFailure?
 
@@ -33,6 +35,10 @@ public final actor CloudSaveEngine {
 
     /// Initializes CKSyncEngine and restores every locally durable pending change.
     public func start() async throws {
+        guard !requiresHostRecovery || unresolvedFailure != nil else {
+            return
+        }
+
         let engine = syncEngine
 
         if configuration.stateSerialization == nil {
@@ -46,12 +52,21 @@ public final actor CloudSaveEngine {
             pendingRecordZoneChanges: pendingChanges.map(\.syncEngineChange)
         )
 
+        clearFailureAfterHostRecovery()
         publishReadyStatus(syncEngine: engine)
         CloudSaveLogging.log("start | pending=\(pendingChanges.count)")
     }
 
     /// Adds locally durable changes to CKSyncEngine's pending state.
     public func enqueue(_ changes: [CloudSavePendingChange]) {
+        guard !requiresHostRecovery else {
+            CloudSaveLogging.log(
+                level: .error,
+                "enqueue | ignored while host recovery is required"
+            )
+            return
+        }
+
         let engine = syncEngine
         engine.state.add(
             pendingRecordZoneChanges: changes.map(\.syncEngineChange)
@@ -73,7 +88,10 @@ public final actor CloudSaveEngine {
             throw error
         } catch {
             let failure = CloudSaveFailure(error: error)
-            await reportAttentionRequiredFailure(failure)
+            await reportAttentionRequiredFailure(
+                failure,
+                requiredRecoveryOperation: .fetching
+            )
             throw error
         }
     }
@@ -91,7 +109,10 @@ public final actor CloudSaveEngine {
             throw error
         } catch {
             let failure = CloudSaveFailure(error: error)
-            await reportAttentionRequiredFailure(failure)
+            await reportAttentionRequiredFailure(
+                failure,
+                requiredRecoveryOperation: .sending
+            )
             throw error
         }
     }
@@ -171,7 +192,7 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
         } catch {
             let failure = CloudSaveFailure(clientError: error)
             await reportAttentionRequiredFailure(failure)
-            await rebuildAfterClientFailure(syncEngine: syncEngine)
+            await stopAfterClientFailure(syncEngine: syncEngine)
             CloudSaveLogging.log(
                 level: .error,
                 "event | failure=\(failure)"
@@ -304,7 +325,8 @@ extension CloudSaveEngine {
                 let failure = CloudSaveFailure(error: failedSave.error)
                 await reportAttentionRequiredFailure(
                     failure,
-                    recordID: recordID
+                    recordID: recordID,
+                    requiredRecoveryOperation: .sending
                 )
                 didRequireAttention = true
             }
@@ -312,11 +334,14 @@ extension CloudSaveEngine {
 
         for (recordID, error) in event.failedRecordDeletes {
             switch error.code {
-            case .unknownItem:
+            case .unknownItem, .zoneNotFound:
                 try await client.didDelete(recordIDs: [recordID])
                 syncEngine.state.remove(
                     pendingRecordZoneChanges: [.deleteRecord(recordID)]
                 )
+                if error.code == .zoneNotFound {
+                    zonesToRetry.append(.saveZone(configuration.zone))
+                }
             default:
                 if error.isTransientCloudSaveError {
                     continue
@@ -325,7 +350,8 @@ extension CloudSaveEngine {
                 let failure = CloudSaveFailure(error: error)
                 await reportAttentionRequiredFailure(
                     failure,
-                    recordID: recordID
+                    recordID: recordID,
+                    requiredRecoveryOperation: .sending
                 )
                 didRequireAttention = true
             }
@@ -345,7 +371,8 @@ extension CloudSaveEngine {
         guard let serverRecord = failedSave.error.serverRecord else {
             await reportAttentionRequiredFailure(
                 .recordConflict,
-                recordID: failedSave.record.recordID
+                recordID: failedSave.record.recordID,
+                requiredRecoveryOperation: .sending
             )
             return true
         }
@@ -370,7 +397,8 @@ extension CloudSaveEngine {
         case .requiresUserDecision:
             await reportAttentionRequiredFailure(
                 .recordConflict,
-                recordID: failedSave.record.recordID
+                recordID: failedSave.record.recordID,
+                requiredRecoveryOperation: .sending
             )
             return true
         }
@@ -393,11 +421,18 @@ extension CloudSaveEngine {
 
     /// Starts a fetch or send that can clear an earlier attention-required failure.
     fileprivate func beginRecoveryOperation(_ operation: RecoveryOperation) {
-        if unresolvedFailure != nil {
-            pendingRecoveryOperation = operation
+        guard let requiredRecoveryOperation else {
+            if unresolvedFailure == nil {
+                statusContinuation.yield(operation.status)
+            }
             return
         }
-        statusContinuation.yield(operation.status)
+
+        guard requiredRecoveryOperation == operation else {
+            return
+        }
+
+        pendingRecoveryOperation = operation
     }
 
     /// Clears an earlier failure only after its replacement operation completes successfully.
@@ -413,6 +448,7 @@ extension CloudSaveEngine {
         }
 
         pendingRecoveryOperation = nil
+        requiredRecoveryOperation = nil
         unresolvedFailure = nil
         publishReadyStatus(syncEngine: syncEngine)
     }
@@ -420,27 +456,21 @@ extension CloudSaveEngine {
     /// Reports a durable failure while preserving it across completion events.
     fileprivate func reportAttentionRequiredFailure(
         _ failure: CloudSaveFailure,
-        recordID: CKRecord.ID? = nil
+        recordID: CKRecord.ID? = nil,
+        requiredRecoveryOperation: RecoveryOperation? = nil
     ) async {
         pendingRecoveryOperation = nil
+        self.requiredRecoveryOperation = requiredRecoveryOperation
         unresolvedFailure = failure
         statusContinuation.yield(.failed(failure))
         await client.handle(failure: failure, recordID: recordID)
     }
 
-    /// Rebuilds the engine from its last durable checkpoint after a host write fails.
-    fileprivate func rebuildAfterClientFailure(syncEngine: CKSyncEngine) async {
+    /// Stops automatic work after a host write fails until the host explicitly restarts it.
+    fileprivate func stopAfterClientFailure(syncEngine: CKSyncEngine) async {
         await syncEngine.cancelOperations()
+        requiresHostRecovery = true
         storedSyncEngine = nil
-
-        do {
-            try await start()
-        } catch {
-            CloudSaveLogging.log(
-                level: .error,
-                "rebuild | failure=\(CloudSaveFailure(error: error))"
-            )
-        }
     }
 
     /// Handles a zone change failure according to CKSyncEngine's retry policy.
@@ -450,7 +480,10 @@ extension CloudSaveEngine {
         }
 
         let failure = CloudSaveFailure(error: error)
-        await reportAttentionRequiredFailure(failure)
+        await reportAttentionRequiredFailure(
+            failure,
+            requiredRecoveryOperation: .sending
+        )
         CloudSaveLogging.log(
             level: .error,
             "zone change | failure=\(failure)"
@@ -467,6 +500,18 @@ extension CloudSaveEngine {
                 hasPendingChanges: !syncEngine.state.pendingRecordZoneChanges.isEmpty
             )
         )
+    }
+
+    /// Clears a host persistence failure after the host explicitly restarts the engine.
+    fileprivate func clearFailureAfterHostRecovery() {
+        guard requiresHostRecovery else {
+            return
+        }
+
+        pendingRecoveryOperation = nil
+        requiredRecoveryOperation = nil
+        requiresHostRecovery = false
+        unresolvedFailure = nil
     }
 }
 
