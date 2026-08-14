@@ -11,6 +11,7 @@ public final actor CloudSaveEngine {
     private let eventHandlingLock = CloudSaveAsyncLock()
     private let statePersistenceLock = CloudSaveAsyncLock()
     private let statusContinuation: AsyncStream<CloudSaveStatus>.Continuation
+    private var isHostFailureInvalidationPending = false
     private var lastPersistedStateSerialization: CKSyncEngine.State.Serialization?
     private var ledgerSnapshotTracker = CloudSaveLedgerSnapshotTracker()
     private var lifecycleGeneration = 0
@@ -36,6 +37,8 @@ public final actor CloudSaveEngine {
 
     /// Initializes CKSyncEngine and restores every locally durable pending change.
     public func start() async throws {
+        await waitForPendingHostFailureInvalidation()
+
         let startingLifecycleGeneration = lifecycleGeneration
         let ledgerSnapshot: CloudSavePendingChangesSnapshot
         do {
@@ -83,7 +86,9 @@ public final actor CloudSaveEngine {
         }
         ledgerSnapshotTracker.recordEnqueues(configuredChanges)
 
-        guard !stateMachine.requiresHostRecovery else {
+        guard !isHostFailureInvalidationPending,
+            !stateMachine.requiresHostRecovery
+        else {
             CloudSaveLogging.log(
                 level: .error,
                 "enqueue | ignored while host recovery is required"
@@ -230,7 +235,8 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
         _ context: CKSyncEngine.SendChangesContext,
         syncEngine: CKSyncEngine
     ) async -> CKSyncEngine.RecordZoneChangeBatch? {
-        guard storedSyncEngine === syncEngine,
+        guard !isHostFailureInvalidationPending,
+            storedSyncEngine === syncEngine,
             !stateMachine.requiresHostRecovery
         else {
             return nil
@@ -267,7 +273,9 @@ extension CloudSaveEngine {
         _ event: CKSyncEngine.Event,
         syncEngine: CKSyncEngine
     ) async {
-        guard storedSyncEngine === syncEngine else {
+        guard !isHostFailureInvalidationPending,
+            storedSyncEngine === syncEngine
+        else {
             CloudSaveLogging.log("event | ignored stale engine")
             return
         }
@@ -353,7 +361,9 @@ extension CloudSaveEngine {
         syncEngine: CKSyncEngine,
         lifecycleGeneration: Int
     ) {
-        guard !stateMachine.requiresHostRecovery else {
+        guard !isHostFailureInvalidationPending,
+            !stateMachine.requiresHostRecovery
+        else {
             throw CloudSaveEngineError.hostRecoveryRequired
         }
 
@@ -374,7 +384,8 @@ extension CloudSaveEngine {
             lifecycleGeneration: Int
         )
     ) throws {
-        guard session.lifecycleGeneration == lifecycleGeneration,
+        guard !isHostFailureInvalidationPending,
+            session.lifecycleGeneration == lifecycleGeneration,
             storedSyncEngine === session.syncEngine,
             !stateMachine.requiresHostRecovery
         else {
@@ -390,7 +401,8 @@ extension CloudSaveEngine {
         )
     ) throws {
         guard
-            session.lifecycleGeneration != lifecycleGeneration
+            isHostFailureInvalidationPending
+                || session.lifecycleGeneration != lifecycleGeneration
                 || storedSyncEngine !== session.syncEngine
                 || stateMachine.requiresHostRecovery
         else {
@@ -400,34 +412,69 @@ extension CloudSaveEngine {
         throw CloudSaveEngineError.hostRecoveryRequired
     }
 
-    /// Invalidates one active engine only after every earlier checkpoint write completes.
-    fileprivate func invalidateAfterHostFailure(
+    /// Blocks new work as soon as a host failure is observed.
+    fileprivate func beginHostFailureInvalidation(
         _ failure: CloudSaveFailure,
         syncEngine: CKSyncEngine?
     ) -> (
-        shouldHandle: Bool,
+        lifecycleGeneration: Int,
         engineToCancel: CKSyncEngine?
-    ) {
+    )? {
         guard syncEngine == nil || storedSyncEngine === syncEngine else {
-            return (
-                shouldHandle: false,
-                engineToCancel: nil
-            )
+            return nil
+        }
+
+        guard !isHostFailureInvalidationPending else {
+            return nil
         }
 
         let engineToCancel = syncEngine ?? storedSyncEngine
+        isHostFailureInvalidationPending = true
         lifecycleGeneration &+= 1
         stateMachine.fail(
             failure,
             context: .hostPersistence
         )
-        storedSyncEngine = nil
         stateMachine.resetActiveOperations()
         publishStatus(syncEngine: engineToCancel)
         return (
-            shouldHandle: true,
+            lifecycleGeneration: lifecycleGeneration,
             engineToCancel: engineToCancel
         )
+    }
+
+    /// Clears the failed engine after every earlier checkpoint write completes.
+    fileprivate func finishHostFailureInvalidation(
+        _ failure: CloudSaveFailure,
+        lifecycleGeneration: Int,
+        syncEngine: CKSyncEngine?
+    ) -> Bool {
+        guard isHostFailureInvalidationPending else {
+            return false
+        }
+
+        isHostFailureInvalidationPending = false
+        guard self.lifecycleGeneration == lifecycleGeneration,
+            storedSyncEngine === syncEngine
+        else {
+            CloudSaveLogging.log("host failure | ignored superseded invalidation")
+            return false
+        }
+
+        stateMachine.fail(
+            failure,
+            context: .hostPersistence
+        )
+        storedSyncEngine = nil
+        publishStatus(syncEngine: syncEngine)
+        return true
+    }
+
+    /// Prevents explicit recovery from overtaking an invalidation waiting on checkpoint writes.
+    fileprivate func waitForPendingHostFailureInvalidation() async {
+        while isHostFailureInvalidationPending {
+            await statePersistenceLock.withLock {}
+        }
     }
 }
 
@@ -616,7 +663,8 @@ extension CloudSaveEngine {
         _ snapshot: CloudSavePendingChangesSnapshot,
         syncEngine: CKSyncEngine
     ) -> Bool {
-        snapshot.belongs(to: lifecycleGeneration)
+        !isHostFailureInvalidationPending
+            && snapshot.belongs(to: lifecycleGeneration)
             && storedSyncEngine === syncEngine
             && !stateMachine.requiresHostRecovery
     }
@@ -702,7 +750,15 @@ extension CloudSaveEngine {
         }
 
         lifecycleGeneration &+= 1
+        let accountLifecycleGeneration = lifecycleGeneration
         try await client.handle(accountChange: accountChange)
+        guard lifecycleGeneration == accountLifecycleGeneration,
+            !isHostFailureInvalidationPending,
+            !stateMachine.requiresHostRecovery,
+            storedSyncEngine === syncEngine
+        else {
+            throw CloudSaveEngineError.hostRecoveryRequired
+        }
         try await restorePendingChangesAfterAccountChange(
             accountChange,
             syncEngine: syncEngine
@@ -924,13 +980,23 @@ extension CloudSaveEngine {
         syncEngine: CKSyncEngine?
     ) async {
         let failure = CloudSaveFailure(clientError: error)
-        let invalidation = await statePersistenceLock.withLock { [self] in
-            await invalidateAfterHostFailure(
+        guard
+            let invalidation = beginHostFailureInvalidation(
                 failure,
                 syncEngine: syncEngine
             )
+        else {
+            return
         }
-        guard invalidation.shouldHandle else {
+
+        let didFinish = await statePersistenceLock.withLock { [self] in
+            await finishHostFailureInvalidation(
+                failure,
+                lifecycleGeneration: invalidation.lifecycleGeneration,
+                syncEngine: invalidation.engineToCancel
+            )
+        }
+        guard didFinish else {
             return
         }
 
