@@ -34,12 +34,12 @@ CloudSaveKit owns CloudKit synchronization mechanics while the host application 
 
 ## Quick start
 
-Add CloudSaveKit to your package dependencies after its first release:
+Add CloudSaveKit to your package dependencies:
 
 ```swift
 .package(
     url: "https://github.com/thatfactory/cloudsavekit.git",
-    from: "0.1.0"
+    from: "0.1.1"
 )
 ```
 
