@@ -15,7 +15,7 @@ let package = Package(
         .library(
             name: "CloudSaveKit",
             targets: ["CloudSaveKit"]
-        ),
+        )
     ],
     dependencies: [
         .package(url: "https://github.com/thatfactory/applogger", from: "1.1.0"),
@@ -28,7 +28,7 @@ let package = Package(
                 .product(
                     name: "AppLogger",
                     package: "applogger"
-                ),
+                )
             ]
         ),
         .testTarget(
