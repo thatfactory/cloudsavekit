@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Lint Swift Sources
-        run: AgentGuidelines/Scripts/swift_format.sh lint-strict Sources Tests
+        run: AgentGuidelines/Scripts/swift_format.sh lint-strict Package.swift Sources Tests
 
   test:
     name: Test
