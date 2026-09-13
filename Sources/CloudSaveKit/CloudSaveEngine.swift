@@ -1,7 +1,7 @@
 import CloudKit
 import Foundation
 
-/// Synchronizes an application's durable local records with a private CloudKit database.
+/// Synchronizes an application's durable local records with a private or shared CloudKit database.
 public final actor CloudSaveEngine {
     /// A stream that retains the latest unconsumed privacy-safe synchronization status.
     public nonisolated let statusUpdates: AsyncStream<CloudSaveStatus>
@@ -19,6 +19,7 @@ public final actor CloudSaveEngine {
     private var lifecycleTransitionWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var lifecycleGeneration = 0
     private var needsAccountTransitionLedgerRefresh = false
+    private var requiresReconfiguration = false
     private var stateMachine = CloudSaveStateMachine()
     private var storedSyncEngine: CKSyncEngine?
 
@@ -42,6 +43,9 @@ public final actor CloudSaveEngine {
     /// Initializes CKSyncEngine and restores every locally durable pending change.
     public func start() async throws {
         try await waitForPendingLifecycleTransition()
+        guard !requiresReconfiguration else {
+            throw CloudSaveEngineError.reconfigurationRequired
+        }
 
         let startingLifecycleGeneration = lifecycleGeneration
         let ledgerSnapshot: CloudSavePendingChangesSnapshot
@@ -67,9 +71,11 @@ public final actor CloudSaveEngine {
         storedSyncEngine = engine
         stateMachine.resolve(.hostPersistence)
 
-        if lastPersistedStateSerialization == nil {
+        if lastPersistedStateSerialization == nil,
+            let zone = configuration.zoneAccess.ownedZone
+        {
             engine.state.add(
-                pendingDatabaseChanges: [.saveZone(configuration.zone)]
+                pendingDatabaseChanges: [.saveZone(zone)]
             )
         }
 
@@ -140,7 +146,7 @@ public final actor CloudSaveEngine {
 
         do {
             let options = CKSyncEngine.FetchChangesOptions(
-                scope: .zoneIDs([configuration.zone.zoneID])
+                scope: .zoneIDs([configuration.zoneID])
             )
             try await session.syncEngine.fetchChanges(options)
             try validate(session)
@@ -197,11 +203,11 @@ public final actor CloudSaveEngine {
         else {
             throw CloudSaveEngineError.hostRecoveryRequired
         }
-        restoreFailedZoneChangeIfNeeded(syncEngine: session.syncEngine)
+        try restoreFailedZoneChangeIfNeeded(syncEngine: session.syncEngine)
 
         do {
             let options = CKSyncEngine.SendChangesOptions(
-                scope: .zoneIDs([configuration.zone.zoneID])
+                scope: .zoneIDs([configuration.zoneID])
             )
             try await session.syncEngine.sendChanges(options)
             try validate(session)
@@ -266,7 +272,8 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
         _ context: CKSyncEngine.SendChangesContext,
         syncEngine: CKSyncEngine
     ) async -> CKSyncEngine.RecordZoneChangeBatch? {
-        guard !isLifecycleTransitionPending,
+        guard !requiresReconfiguration,
+            !isLifecycleTransitionPending,
             storedSyncEngine === syncEngine,
             !stateMachine.requiresHostRecovery
         else {
@@ -337,7 +344,8 @@ extension CloudSaveEngine {
         _ event: CKSyncEngine.Event,
         syncEngine: CKSyncEngine
     ) async {
-        guard !isLifecycleTransitionPending,
+        guard !requiresReconfiguration,
+            !isLifecycleTransitionPending,
             storedSyncEngine === syncEngine
         else {
             CloudSaveLogging.log("event | ignored stale engine")
@@ -396,6 +404,19 @@ extension CloudSaveEngine {
                     "event | unknown"
                 )
             }
+        } catch CloudSaveEngineError.reconfigurationRequired {
+            if isAccountTransitionPending {
+                endAccountTransition()
+            }
+            await reportFailure(
+                .zoneUnavailable,
+                context: .zone(configuration.zoneID),
+                syncEngine: syncEngine
+            )
+            CloudSaveLogging.log(
+                level: .error,
+                "event | shared-zone reconfiguration required"
+            )
         } catch {
             await handleHostFailure(
                 error,
@@ -422,7 +443,8 @@ extension CloudSaveEngine {
         syncEngine: CKSyncEngine,
         lifecycleGeneration: Int
     ) -> Bool {
-        !isLifecycleTransitionPending
+        !requiresReconfiguration
+            && !isLifecycleTransitionPending
             && self.lifecycleGeneration == lifecycleGeneration
             && storedSyncEngine === syncEngine
             && !stateMachine.requiresHostRecovery
@@ -445,10 +467,13 @@ extension CloudSaveEngine {
         syncEngine: CKSyncEngine,
         lifecycleGeneration: Int
     ) {
-        guard !isLifecycleTransitionPending,
+        guard !requiresReconfiguration,
+            !isLifecycleTransitionPending,
             !stateMachine.requiresHostRecovery
         else {
-            throw CloudSaveEngineError.hostRecoveryRequired
+            throw requiresReconfiguration
+                ? CloudSaveEngineError.reconfigurationRequired
+                : CloudSaveEngineError.hostRecoveryRequired
         }
 
         guard let storedSyncEngine else {
@@ -754,7 +779,7 @@ extension CloudSaveEngine {
         }
         stateMachine.reconcilePendingRecordIDs(
             Set(effectiveChanges.keys),
-            in: configuration.zone.zoneID
+            in: configuration.zoneID
         )
         return true
     }
@@ -876,13 +901,17 @@ extension CloudSaveEngine {
     }
 
     /// Restores a failed configured-zone save only for a host-requested explicit send.
-    fileprivate func restoreFailedZoneChangeIfNeeded(syncEngine: CKSyncEngine) {
-        guard stateMachine.requiresRecovery(for: configuration.zone.zoneID) else {
+    fileprivate func restoreFailedZoneChangeIfNeeded(syncEngine: CKSyncEngine) throws {
+        guard stateMachine.requiresRecovery(for: configuration.zoneID) else {
             return
         }
 
+        guard let zone = configuration.zoneAccess.ownedZone else {
+            requiresReconfiguration = true
+            throw CloudSaveEngineError.reconfigurationRequired
+        }
         syncEngine.state.add(
-            pendingDatabaseChanges: [.saveZone(configuration.zone)]
+            pendingDatabaseChanges: [.saveZone(zone)]
         )
     }
 
@@ -895,9 +924,11 @@ extension CloudSaveEngine {
 
         guard case .signedOut = accountChange else {
             let ledgerSnapshot = try await readPendingChangesSnapshot()
-            syncEngine.state.add(
-                pendingDatabaseChanges: [.saveZone(configuration.zone)]
-            )
+            guard let zone = configuration.zoneAccess.ownedZone else {
+                requiresReconfiguration = true
+                throw CloudSaveEngineError.reconfigurationRequired
+            }
+            syncEngine.state.add(pendingDatabaseChanges: [.saveZone(zone)])
             guard
                 restoreDurablePendingChanges(
                     ledgerSnapshot,
@@ -949,13 +980,15 @@ extension CloudSaveEngine {
             return
         }
 
+        guard let zone = configuration.zoneAccess.ownedZone else {
+            requiresReconfiguration = true
+            throw CloudSaveEngineError.reconfigurationRequired
+        }
         try await commitPendingChangesMutation { [client] in
             try await client.applyDeletedZones(configuredZoneIDs)
         }
         let ledgerSnapshot = try await readPendingChangesSnapshot()
-        syncEngine.state.add(
-            pendingDatabaseChanges: [.saveZone(configuration.zone)]
-        )
+        syncEngine.state.add(pendingDatabaseChanges: [.saveZone(zone)])
         guard
             restoreDurablePendingChanges(
                 ledgerSnapshot,
@@ -1074,9 +1107,13 @@ extension CloudSaveEngine {
                     syncEngine: syncEngine
                 )
             case .zoneNotFound:
-                try await client.clearServerRecord(for: recordID)
-                zonesToRetry.append(.saveZone(configuration.zone))
-                changesToRetry.append(.saveRecord(recordID))
+                if let zone = configuration.zoneAccess.ownedZone {
+                    try await client.clearServerRecord(for: recordID)
+                    zonesToRetry.append(.saveZone(zone))
+                    changesToRetry.append(.saveRecord(recordID))
+                } else {
+                    requiresReconfiguration = true
+                }
             case .unknownItem:
                 try await client.clearServerRecord(for: recordID)
                 changesToRetry.append(.saveRecord(recordID))
@@ -1094,6 +1131,13 @@ extension CloudSaveEngine {
         }
 
         for (recordID, error) in event.failedRecordDeletes where isInConfiguredZone(recordID) {
+            if error.code == .zoneNotFound,
+                configuration.zoneAccess.ownedZone == nil
+            {
+                requiresReconfiguration = true
+                continue
+            }
+
             switch error.code {
             case .unknownItem, .zoneNotFound:
                 try await commitPendingChangesMutation { [client] in
@@ -1103,8 +1147,10 @@ extension CloudSaveEngine {
                     [.delete(recordID)],
                     syncEngine: syncEngine
                 )
-                if error.code == .zoneNotFound {
-                    zonesToRetry.append(.saveZone(configuration.zone))
+                if error.code == .zoneNotFound,
+                    let zone = configuration.zoneAccess.ownedZone
+                {
+                    zonesToRetry.append(.saveZone(zone))
                 }
             default:
                 guard CloudSaveRetryPolicy.requiresApplicationAttention(for: error) else {
@@ -1121,6 +1167,9 @@ extension CloudSaveEngine {
 
         syncEngine.state.add(pendingDatabaseChanges: zonesToRetry)
         syncEngine.state.add(pendingRecordZoneChanges: changesToRetry)
+        if requiresReconfiguration {
+            throw CloudSaveEngineError.reconfigurationRequired
+        }
         publishStatus(syncEngine: syncEngine)
     }
 
@@ -1334,11 +1383,11 @@ extension CloudSaveEngine {
 
     /// Filters CloudKit changes to the custom zone owned by this engine.
     fileprivate func isInConfiguredZone(_ recordID: CKRecord.ID) -> Bool {
-        recordID.zoneID == configuration.zone.zoneID
+        recordID.zoneID == configuration.zoneID
     }
 
     /// Filters custom-zone events to the zone owned by this engine.
     fileprivate func isInConfiguredZone(_ zoneID: CKRecordZone.ID) -> Bool {
-        zoneID == configuration.zone.zoneID
+        zoneID == configuration.zoneID
     }
 }

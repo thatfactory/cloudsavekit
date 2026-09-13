@@ -7,4 +7,7 @@ public enum CloudSaveEngineError: Error, Equatable, Sendable {
 
     /// A host persistence callback failed and the host must recover before restarting the engine.
     case hostRecoveryRequired
+
+    /// The configured shared-zone topology changed and the host must rediscover it.
+    case reconfigurationRequired
 }
