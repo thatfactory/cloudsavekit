@@ -9,6 +9,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   format:
     name: Swift Format
@@ -16,6 +19,9 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
+
+      - name: Validate Consumer Integration
+        run: AgentGuidelines/Scripts/validate_consumer_setup.swift
 
       - name: Lint Swift Sources
         run: AgentGuidelines/Scripts/swift_format.sh lint-strict Package.swift Sources Tests
