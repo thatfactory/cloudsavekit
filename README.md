@@ -11,13 +11,13 @@
 
 # CloudSaveKit
 
-A reusable `CKSyncEngine` coordinator for synchronizing app-owned local data with a private CloudKit database. ☁️
+A reusable `CKSyncEngine` coordinator for synchronizing app-owned local data with private and shared CloudKit databases. ☁️
 
 ```mermaid
 flowchart LR
     LocalStore["Host local store"] --> Client["CloudSaveClient"]
     Client <--> Engine["CloudSaveEngine"]
-    Engine <--> CloudKit["Private CloudKit database"]
+    Engine <--> CloudKit["Private or shared CloudKit database"]
 ```
 
 CloudSaveKit owns CloudKit synchronization mechanics while the host application remains responsible for its local persistence, record schema, merge semantics, and user experience. It deliberately has no dependency on SwiftData, Core Data, Redux, or SwiftUI.
@@ -25,7 +25,8 @@ CloudSaveKit owns CloudKit synchronization mechanics while the host application 
 ## Responsibilities
 
 - Restore and persist opaque `CKSyncEngine` state.
-- Create and recover a custom CloudKit record zone.
+- Create and recover an owned custom zone without recreating participant-owned shared zones.
+- Create, accept, and discover private zone-wide shares through a UI-independent coordinator.
 - Batch pending record saves and deletions within CloudKit limits.
 - Schedule automatic synchronization and expose explicit fetch, send, and combined sync operations.
 - Forward fetched changes, account events, saved system fields, and semantic conflicts to the host.
@@ -60,6 +61,18 @@ let engine = CloudSaveEngine(
 
 try await engine.start()
 ```
+
+For a share participant, preserve the exact owner-qualified zone ID and configure the shared database:
+
+```swift
+let configuration = CloudSaveConfiguration(
+    database: container.sharedCloudDatabase,
+    stateSerialization: restoredSharedState,
+    sharedZoneID: discoveredZoneID
+)
+```
+
+Use `CloudSaveSharingCoordinator` to create or fetch a private zone-wide share, accept system-provided share metadata, and discover shared zones. The host remains responsible for presenting `UICloudSharingController` and deciding which shared zone belongs to its product. A missing or revoked shared zone raises `CloudSaveEngineError.reconfigurationRequired`; CloudSaveKit never creates a private replacement.
 
 Persist every state value received by `CloudSaveClient.persist(stateSerialization:)` and restore it through `CloudSaveConfiguration.stateSerialization`. Also return every locally durable unsent change from `pendingChanges()`: this is what lets the engine recover correctly after termination, relaunch, zone recreation, and iCloud account changes.
 
@@ -113,4 +126,4 @@ CloudSaveKit logs concise synchronization lifecycle information through [AppLogg
 - Swift 6.4
 - Xcode 27
 - iOS, macOS, tvOS, watchOS, or visionOS 26+
-- A private CloudKit container with CloudKit and Remote Notifications capabilities
+- A CloudKit container with CloudKit and Remote Notifications capabilities
