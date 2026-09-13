@@ -4,15 +4,19 @@ All notable changes to CloudSaveKit are documented here.
 
 ## Unreleased
 
+## 0.2.1 — 2026-09-13
+
+### Fixed
+
+- Restored a share participant's durable record changes after initial sign-in without attempting to create the owner's shared zone.
+
+## 0.2.0 — 2026-09-13
+
 ### Added
 
 - Added explicit owned and shared zone configuration for `CKSyncEngine`.
 - Added UI-independent zone-wide share creation, acceptance, and discovery.
 - Added a reconfiguration boundary for unavailable shared zones so participants never create private replacements.
-
-### Fixed
-
-- Restored a share participant's durable record changes after initial sign-in without attempting to create the owner's shared zone.
 
 ## 0.1.1 — 2026-08-18
 
