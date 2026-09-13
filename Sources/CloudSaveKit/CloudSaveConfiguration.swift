@@ -12,6 +12,11 @@ public struct CloudSaveConfiguration: Sendable {
     /// The configured zone and its lifecycle ownership.
     public let zoneAccess: CloudSaveZoneAccess
 
+    /// The configured custom record zone.
+    ///
+    /// New code should use ``zoneAccess`` or ``zoneID`` to retain ownership semantics.
+    public let zone: CKRecordZone
+
     /// The exact configured zone identifier.
     public var zoneID: CKRecordZone.ID {
         zoneAccess.zoneID
@@ -34,6 +39,7 @@ public struct CloudSaveConfiguration: Sendable {
         precondition(database.databaseScope == .private, "Owned zones require a private database.")
         self.database = database
         self.stateSerialization = stateSerialization
+        self.zone = zone
         zoneAccess = .owned(zone)
         self.automaticallySync = automaticallySync
         self.subscriptionID = subscriptionID
@@ -49,6 +55,7 @@ public struct CloudSaveConfiguration: Sendable {
         precondition(database.databaseScope == .shared, "Shared zones require a shared database.")
         self.database = database
         self.stateSerialization = stateSerialization
+        zone = CKRecordZone(zoneID: sharedZoneID)
         zoneAccess = .shared(sharedZoneID)
         self.automaticallySync = automaticallySync
         self.subscriptionID = subscriptionID

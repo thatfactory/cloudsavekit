@@ -980,14 +980,14 @@ extension CloudSaveEngine {
             return
         }
 
-        try await commitPendingChangesMutation { [client] in
-            try await client.applyDeletedZones(configuredZoneIDs)
-        }
-        let ledgerSnapshot = try await readPendingChangesSnapshot()
         guard let zone = configuration.zoneAccess.ownedZone else {
             requiresReconfiguration = true
             throw CloudSaveEngineError.reconfigurationRequired
         }
+        try await commitPendingChangesMutation { [client] in
+            try await client.applyDeletedZones(configuredZoneIDs)
+        }
+        let ledgerSnapshot = try await readPendingChangesSnapshot()
         syncEngine.state.add(pendingDatabaseChanges: [.saveZone(zone)])
         guard
             restoreDurablePendingChanges(
@@ -1107,8 +1107,8 @@ extension CloudSaveEngine {
                     syncEngine: syncEngine
                 )
             case .zoneNotFound:
-                try await client.clearServerRecord(for: recordID)
                 if let zone = configuration.zoneAccess.ownedZone {
+                    try await client.clearServerRecord(for: recordID)
                     zonesToRetry.append(.saveZone(zone))
                     changesToRetry.append(.saveRecord(recordID))
                 } else {
@@ -1131,6 +1131,13 @@ extension CloudSaveEngine {
         }
 
         for (recordID, error) in event.failedRecordDeletes where isInConfiguredZone(recordID) {
+            if error.code == .zoneNotFound,
+                configuration.zoneAccess.ownedZone == nil
+            {
+                requiresReconfiguration = true
+                continue
+            }
+
             switch error.code {
             case .unknownItem, .zoneNotFound:
                 try await commitPendingChangesMutation { [client] in
@@ -1140,12 +1147,10 @@ extension CloudSaveEngine {
                     [.delete(recordID)],
                     syncEngine: syncEngine
                 )
-                if error.code == .zoneNotFound {
-                    if let zone = configuration.zoneAccess.ownedZone {
-                        zonesToRetry.append(.saveZone(zone))
-                    } else {
-                        requiresReconfiguration = true
-                    }
+                if error.code == .zoneNotFound,
+                    let zone = configuration.zoneAccess.ownedZone
+                {
+                    zonesToRetry.append(.saveZone(zone))
                 }
             default:
                 guard CloudSaveRetryPolicy.requiresApplicationAttention(for: error) else {
