@@ -31,4 +31,12 @@ public enum CloudSaveZoneAccess: Sendable {
         }
         return nil
     }
+
+    /// Database changes needed when CKSyncEngine clears state for an account transition.
+    var accountTransitionDatabaseChanges: [CKSyncEngine.PendingDatabaseChange] {
+        guard let ownedZone else {
+            return []
+        }
+        return [.saveZone(ownedZone)]
+    }
 }
