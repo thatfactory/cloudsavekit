@@ -924,11 +924,9 @@ extension CloudSaveEngine {
 
         guard case .signedOut = accountChange else {
             let ledgerSnapshot = try await readPendingChangesSnapshot()
-            guard let zone = configuration.zoneAccess.ownedZone else {
-                requiresReconfiguration = true
-                throw CloudSaveEngineError.reconfigurationRequired
-            }
-            syncEngine.state.add(pendingDatabaseChanges: [.saveZone(zone)])
+            syncEngine.state.add(
+                pendingDatabaseChanges: configuration.zoneAccess.accountTransitionDatabaseChanges
+            )
             guard
                 restoreDurablePendingChanges(
                     ledgerSnapshot,

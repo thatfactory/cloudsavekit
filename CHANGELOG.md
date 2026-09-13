@@ -10,6 +10,10 @@ All notable changes to CloudSaveKit are documented here.
 - Added UI-independent zone-wide share creation, acceptance, and discovery.
 - Added a reconfiguration boundary for unavailable shared zones so participants never create private replacements.
 
+### Fixed
+
+- Restored a share participant's durable record changes after initial sign-in without attempting to create the owner's shared zone.
+
 ## 0.1.1 — 2026-08-18
 
 ### Maintenance

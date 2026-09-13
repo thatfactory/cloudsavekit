@@ -24,4 +24,21 @@ struct CloudSaveZoneAccessTests {
         #expect(!access.isOwned)
         #expect(access.ownedZone == nil)
     }
+
+    @Test("Account transitions recreate owned zones but never participant-owned shared zones")
+    func accountTransitionZoneChangesRespectOwnership() throws {
+        let ownedZone = CKRecordZone(zoneName: "Owned")
+        let sharedZoneID = CKRecordZone.ID(zoneName: "Shared", ownerName: "owner")
+
+        let ownedChanges = CloudSaveZoneAccess.owned(ownedZone).accountTransitionDatabaseChanges
+        let sharedChanges = CloudSaveZoneAccess.shared(sharedZoneID).accountTransitionDatabaseChanges
+
+        let ownedChange = try #require(ownedChanges.first)
+        guard case .saveZone(let restoredZone) = ownedChange else {
+            Issue.record("Expected an owned-zone save")
+            return
+        }
+        #expect(restoredZone.zoneID == ownedZone.zoneID)
+        #expect(sharedChanges.isEmpty)
+    }
 }
