@@ -34,4 +34,22 @@ struct CloudSaveLoggingTests {
                 == "☁️ fetch request | request=12, result=success"
         )
     }
+
+    @Test func formatsFetchDiagnosticsWithoutCloudKitIdentities() {
+        #expect(
+            CloudSaveLogging.fetchState(phase: "before", configuredZoneDirty: true)
+                == "fetch state | phase=before, configured-zone-dirty=true"
+        )
+        #expect(
+            CloudSaveLogging.fetchedDatabaseChanges(
+                modifications: 2,
+                deletions: 1,
+                configuredZoneChanged: true
+            ) == "fetch database | modifications=2, deletions=1, configured-zone-changed=true"
+        )
+        #expect(
+            CloudSaveLogging.fetchedConfiguredZoneChanges(modifications: 3, deletions: 1)
+                == "fetch zone | phase=changes, modifications=3, deletions=1"
+        )
+    }
 }

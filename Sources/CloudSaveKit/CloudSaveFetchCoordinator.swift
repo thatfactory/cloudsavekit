@@ -5,6 +5,7 @@ actor CloudSaveFetchCoordinator {
     private var activeFetchGenerations: [Int] = []
     private var completedGeneration = 0
     private var fetchGeneration = 0
+    private var failedFetchGenerations: Set<Int> = []
     private var idleWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var lifecycleGeneration = 0
     private var requestGeneration = 0
@@ -46,6 +47,14 @@ actor CloudSaveFetchCoordinator {
         return completedGeneration
     }
 
+    /// Marks the active fetch generation as failed for the configured zone.
+    func failConfiguredZoneFetch() {
+        guard let generation = activeFetchGenerations.first else {
+            return
+        }
+        failedFetchGenerations.insert(generation)
+    }
+
     /// Verifies that a fetch which began no earlier than the request has completed.
     func validate(_ request: Request) throws {
         guard request.lifecycleGeneration == lifecycleGeneration else {
@@ -54,12 +63,16 @@ actor CloudSaveFetchCoordinator {
         guard completedGeneration >= request.requiredFetchGeneration else {
             throw CloudSaveEngineError.freshFetchNotObserved
         }
+        guard !failedFetchGenerations.contains(request.requiredFetchGeneration) else {
+            throw CloudSaveEngineError.configuredZoneFetchFailed
+        }
     }
 
     /// Invalidates suspended requests when their engine lifecycle ends.
     func invalidate() {
         lifecycleGeneration &+= 1
         activeFetchGenerations.removeAll()
+        failedFetchGenerations.removeAll()
         let waiters = idleWaiters.values
         idleWaiters.removeAll()
         for waiter in waiters {

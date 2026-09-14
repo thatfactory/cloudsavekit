@@ -104,4 +104,30 @@ struct CloudSaveFetchCoordinatorTests {
             try await coordinator.validate(request)
         }
     }
+
+    @Test func configuredZoneFailureRejectsQualifyingRequest() async throws {
+        let coordinator = CloudSaveFetchCoordinator()
+        let request = try await coordinator.prepareRequest()
+        _ = await coordinator.beginFetch()
+
+        await coordinator.failConfiguredZoneFetch()
+        _ = await coordinator.completeFetch()
+
+        await #expect(throws: CloudSaveEngineError.configuredZoneFetchFailed) {
+            try await coordinator.validate(request)
+        }
+    }
+
+    @Test func olderZoneFailureDoesNotPoisonLaterRequest() async throws {
+        let coordinator = CloudSaveFetchCoordinator()
+        _ = await coordinator.beginFetch()
+        await coordinator.failConfiguredZoneFetch()
+        _ = await coordinator.completeFetch()
+        let request = try await coordinator.prepareRequest()
+
+        _ = await coordinator.beginFetch()
+        _ = await coordinator.completeFetch()
+
+        try await coordinator.validate(request)
+    }
 }

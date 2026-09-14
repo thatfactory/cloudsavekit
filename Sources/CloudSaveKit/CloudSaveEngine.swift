@@ -163,12 +163,26 @@ public final actor CloudSaveEngine {
         )
 
         do {
+            CloudSaveLogging.log(
+                CloudSaveLogging.fetchState(
+                    phase: "before",
+                    configuredZoneDirty: session.syncEngine.state.zoneIDsWithUnfetchedServerChanges
+                        .contains(configuration.zoneID)
+                )
+            )
             let options = CKSyncEngine.FetchChangesOptions(
                 scope: .zoneIDs([configuration.zoneID])
             )
             try await session.syncEngine.fetchChanges(options)
             try await fetchCoordinator.validate(request)
             try validate(session)
+            CloudSaveLogging.log(
+                CloudSaveLogging.fetchState(
+                    phase: "after",
+                    configuredZoneDirty: session.syncEngine.state.zoneIDsWithUnfetchedServerChanges
+                        .contains(configuration.zoneID)
+                )
+            )
             CloudSaveLogging.log(
                 CloudSaveLogging.fetchRequestSucceeded(request: request.requestGeneration)
             )
@@ -397,6 +411,18 @@ extension CloudSaveEngine {
                     syncEngine: syncEngine
                 )
             case .fetchedDatabaseChanges(let event):
+                CloudSaveLogging.log(
+                    CloudSaveLogging.fetchedDatabaseChanges(
+                        modifications: event.modifications.count,
+                        deletions: event.deletions.count,
+                        configuredZoneChanged: event.modifications.contains {
+                            isInConfiguredZone($0.zoneID)
+                        }
+                            || event.deletions.contains {
+                                isInConfiguredZone($0.zoneID)
+                            }
+                    )
+                )
                 try await restoreDeletedZones(
                     event.deletions.map(\.zoneID).filter(isInConfiguredZone),
                     syncEngine: syncEngine
@@ -404,6 +430,12 @@ extension CloudSaveEngine {
             case .fetchedRecordZoneChanges(let event):
                 let fetchedRecords = event.modifications.map(\.record).filter(isInConfiguredZone)
                 let deletedRecordIDs = event.deletions.map(\.recordID).filter(isInConfiguredZone)
+                CloudSaveLogging.log(
+                    CloudSaveLogging.fetchedConfiguredZoneChanges(
+                        modifications: fetchedRecords.count,
+                        deletions: deletedRecordIDs.count
+                    )
+                )
                 try await commitPendingChangesMutation { [client] in
                     try await client.applyFetchedChanges(
                         records: fetchedRecords,
@@ -420,10 +452,13 @@ extension CloudSaveEngine {
                     event,
                     syncEngine: syncEngine
                 )
-            case .willFetchChanges:
+            case .willFetchChanges(let event):
                 begin(.fetching, syncEngine: syncEngine)
                 let generation = await fetchCoordinator.beginFetch()
-                CloudSaveLogging.log(CloudSaveLogging.fetchGeneration(generation, phase: "started"))
+                let reason = event.context.reason == .manual ? "manual" : "scheduled"
+                CloudSaveLogging.log(
+                    "\(CloudSaveLogging.fetchGeneration(generation, phase: "started")), reason=\(reason)"
+                )
             case .willSendChanges:
                 begin(.sending, syncEngine: syncEngine)
             case .didFetchChanges:
@@ -432,8 +467,19 @@ extension CloudSaveEngine {
                 CloudSaveLogging.log(CloudSaveLogging.fetchGeneration(generation, phase: "completed"))
             case .didSendChanges:
                 complete(.sending, syncEngine: syncEngine)
-            case .willFetchRecordZoneChanges, .didFetchRecordZoneChanges:
-                break
+            case .willFetchRecordZoneChanges(let event):
+                guard isInConfiguredZone(event.zoneID) else {
+                    break
+                }
+                CloudSaveLogging.log("fetch zone | phase=started, configured=true")
+            case .didFetchRecordZoneChanges(let event):
+                guard isInConfiguredZone(event.zoneID) else {
+                    break
+                }
+                CloudSaveLogging.log(CloudSaveLogging.configuredZoneFetchCompleted(error: event.error))
+                if event.error != nil {
+                    await fetchCoordinator.failConfiguredZoneFetch()
+                }
             @unknown default:
                 CloudSaveLogging.log(
                     level: .info,
