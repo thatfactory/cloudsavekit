@@ -10,4 +10,7 @@ public enum CloudSaveEngineError: Error, Equatable, Sendable {
 
     /// The configured shared-zone topology changed and the host must rediscover it.
     case reconfigurationRequired
+
+    /// CKSyncEngine completed an explicit call without emitting a qualifying fresh fetch generation.
+    case freshFetchNotObserved
 }

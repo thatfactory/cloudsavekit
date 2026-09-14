@@ -9,6 +9,8 @@ public final actor CloudSaveEngine {
     private let client: any CloudSaveClient
     private let configuration: CloudSaveConfiguration
     private let eventHandlingLock = CloudSaveAsyncLock()
+    private let explicitOperationLock = CloudSaveAsyncLock()
+    private let fetchCoordinator = CloudSaveFetchCoordinator()
     private let ledgerPersistenceLock = CloudSaveAsyncLock()
     private let statePersistenceLock = CloudSaveAsyncLock()
     private let statusContinuation: AsyncStream<CloudSaveStatus>.Continuation
@@ -140,9 +142,24 @@ public final actor CloudSaveEngine {
 
     /// Immediately fetches changes for the configured save zone.
     public func fetchNow() async throws {
+        try await explicitOperationLock.withLock { [self] in
+            try await performFetchNow()
+        }
+    }
+
+    /// Performs a serialized explicit fetch without recursively acquiring the operation gate.
+    private func performFetchNow() async throws {
         try await waitForPendingLifecycleTransition()
 
         let session = try operationalSyncEngine()
+        let request = try await fetchCoordinator.prepareRequest()
+        CloudSaveLogging.log(
+            CloudSaveLogging.fetchRequest(
+                request: request.requestGeneration,
+                requiredFetch: request.requiredFetchGeneration,
+                waitedForPriorFetch: request.waitedForPriorFetch
+            )
+        )
 
         do {
             let options = CKSyncEngine.FetchChangesOptions(
@@ -150,6 +167,10 @@ public final actor CloudSaveEngine {
             )
             try await session.syncEngine.fetchChanges(options)
             try validate(session)
+            try await fetchCoordinator.validate(request)
+            CloudSaveLogging.log(
+                CloudSaveLogging.fetchRequestSucceeded(request: request.requestGeneration)
+            )
         } catch is CancellationError {
             try throwRecoveryErrorIfNeeded(for: session)
             throw CancellationError()
@@ -172,6 +193,13 @@ public final actor CloudSaveEngine {
 
     /// Immediately sends every locally durable pending change for the configured save zone.
     public func sendNow() async throws {
+        try await explicitOperationLock.withLock { [self] in
+            try await performSendNow()
+        }
+    }
+
+    /// Performs a serialized explicit send without recursively acquiring the operation gate.
+    private func performSendNow() async throws {
         try await waitForPendingLifecycleTransition()
 
         let session = try operationalSyncEngine()
@@ -233,12 +261,15 @@ public final actor CloudSaveEngine {
 
     /// Fetches, merges, and then sends pending changes for the configured save zone.
     public func syncNow() async throws {
-        try await fetchNow()
-        try await sendNow()
+        try await explicitOperationLock.withLock { [self] in
+            try await performFetchNow()
+            try await performSendNow()
+        }
     }
 
     /// Cancels in-flight CKSyncEngine operations without starting or rebuilding an engine.
     public func cancel() async {
+        await fetchCoordinator.invalidate()
         guard let storedSyncEngine else {
             return
         }
@@ -390,10 +421,14 @@ extension CloudSaveEngine {
                 )
             case .willFetchChanges:
                 begin(.fetching, syncEngine: syncEngine)
+                let generation = await fetchCoordinator.beginFetch()
+                CloudSaveLogging.log(CloudSaveLogging.fetchGeneration(generation, phase: "started"))
             case .willSendChanges:
                 begin(.sending, syncEngine: syncEngine)
             case .didFetchChanges:
                 complete(.fetching, syncEngine: syncEngine)
+                let generation = await fetchCoordinator.completeFetch()
+                CloudSaveLogging.log(CloudSaveLogging.fetchGeneration(generation, phase: "completed"))
             case .didSendChanges:
                 complete(.sending, syncEngine: syncEngine)
             case .willFetchRecordZoneChanges, .didFetchRecordZoneChanges:
@@ -525,7 +560,7 @@ extension CloudSaveEngine {
     fileprivate func beginHostFailureInvalidation(
         _ failure: CloudSaveFailure,
         syncEngine: CKSyncEngine?
-    ) -> (
+    ) async -> (
         lifecycleGeneration: Int,
         engineToCancel: CKSyncEngine?
     )? {
@@ -542,6 +577,7 @@ extension CloudSaveEngine {
         isAccountTransitionPending = false
         needsAccountTransitionLedgerRefresh = false
         lifecycleGeneration &+= 1
+        await fetchCoordinator.invalidate()
         stateMachine.fail(
             failure,
             context: .hostPersistence
@@ -855,7 +891,7 @@ extension CloudSaveEngine {
         _ error: any Error,
         syncEngine: CKSyncEngine,
         lifecycleGeneration: Int
-    ) {
+    ) async {
         guard
             isActive(
                 syncEngine: syncEngine,
@@ -867,7 +903,7 @@ extension CloudSaveEngine {
 
         let failure = CloudSaveFailure(clientError: error)
         guard
-            let invalidation = beginHostFailureInvalidation(
+            let invalidation = await beginHostFailureInvalidation(
                 failure,
                 syncEngine: syncEngine
             )
@@ -1017,6 +1053,7 @@ extension CloudSaveEngine {
         isAccountTransitionPending = true
         needsAccountTransitionLedgerRefresh = false
         lifecycleGeneration &+= 1
+        await fetchCoordinator.invalidate()
         let accountLifecycleGeneration = lifecycleGeneration
         try await commitPendingChangesMutation { [client] in
             try await client.handle(accountChange: accountChange)
@@ -1283,7 +1320,7 @@ extension CloudSaveEngine {
     ) async {
         let failure = CloudSaveFailure(clientError: error)
         guard
-            let invalidation = beginHostFailureInvalidation(
+            let invalidation = await beginHostFailureInvalidation(
                 failure,
                 syncEngine: syncEngine
             )

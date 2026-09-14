@@ -4,6 +4,11 @@ All notable changes to CloudSaveKit are documented here.
 
 ## Unreleased
 
+### Fixed
+
+- Made explicit fetch and sync requests wait for a post-request CKSyncEngine fetch generation and all related host applies instead of coalescing with stale pre-request work.
+- Serialized explicit fetch, send, and sync operations per engine while preserving automatic CKSyncEngine scheduling.
+
 ## 0.2.1 — 2026-09-13
 
 ### Fixed
