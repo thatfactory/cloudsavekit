@@ -5,7 +5,9 @@ actor CloudSaveFetchCoordinator {
     private var activeFetchGenerations: [Int] = []
     private var completedGeneration = 0
     private var fetchGeneration = 0
+    private var failedFetchGenerations: Set<Int> = []
     private var idleWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+    private var latestSuccessfulFetchGeneration = 0
     private var lifecycleGeneration = 0
     private var requestGeneration = 0
 
@@ -37,8 +39,13 @@ actor CloudSaveFetchCoordinator {
     /// Records one terminal fetch event and releases requests after all older work drains.
     @discardableResult
     func completeFetch() -> Int {
-        if !activeFetchGenerations.isEmpty {
-            completedGeneration = max(completedGeneration, activeFetchGenerations.removeFirst())
+        guard !activeFetchGenerations.isEmpty else {
+            return completedGeneration
+        }
+        let generation = activeFetchGenerations.removeFirst()
+        completedGeneration = max(completedGeneration, generation)
+        if !failedFetchGenerations.contains(generation) {
+            latestSuccessfulFetchGeneration = max(latestSuccessfulFetchGeneration, generation)
         }
         if activeFetchGenerations.isEmpty {
             resumeIdleWaiters()
@@ -46,20 +53,34 @@ actor CloudSaveFetchCoordinator {
         return completedGeneration
     }
 
+    /// Marks the active fetch generation as failed for the configured zone.
+    func failConfiguredZoneFetch() {
+        guard let generation = activeFetchGenerations.first else {
+            return
+        }
+        failedFetchGenerations.insert(generation)
+    }
+
     /// Verifies that a fetch which began no earlier than the request has completed.
     func validate(_ request: Request) throws {
         guard request.lifecycleGeneration == lifecycleGeneration else {
             throw CloudSaveEngineError.hostRecoveryRequired
         }
+        if latestSuccessfulFetchGeneration >= request.requiredFetchGeneration {
+            return
+        }
         guard completedGeneration >= request.requiredFetchGeneration else {
             throw CloudSaveEngineError.freshFetchNotObserved
         }
+        throw CloudSaveEngineError.configuredZoneFetchFailed
     }
 
     /// Invalidates suspended requests when their engine lifecycle ends.
     func invalidate() {
         lifecycleGeneration &+= 1
         activeFetchGenerations.removeAll()
+        failedFetchGenerations.removeAll()
+        latestSuccessfulFetchGeneration = 0
         let waiters = idleWaiters.values
         idleWaiters.removeAll()
         for waiter in waiters {

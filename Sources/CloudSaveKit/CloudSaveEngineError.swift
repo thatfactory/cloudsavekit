@@ -13,4 +13,7 @@ public enum CloudSaveEngineError: Error, Equatable, Sendable {
 
     /// CKSyncEngine completed an explicit call without emitting a qualifying fresh fetch generation.
     case freshFetchNotObserved
+
+    /// The configured zone failed during the qualifying fetch generation.
+    case configuredZoneFetchFailed
 }

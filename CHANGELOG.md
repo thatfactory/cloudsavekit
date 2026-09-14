@@ -2,6 +2,13 @@
 
 All notable changes to CloudSaveKit are documented here.
 
+## Unreleased
+
+### Fixed
+
+- Propagate configured-zone fetch failures through explicit freshness requests instead of treating only the outer fetch generation as success.
+- Add privacy-safe fetch-stage diagnostics for database discovery, configured-zone delivery, and dirty-state transitions.
+
 ## 0.2.2 — 2026-09-14
 
 ### Fixed
