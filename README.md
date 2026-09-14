@@ -40,7 +40,7 @@ Add CloudSaveKit to your package dependencies:
 ```swift
 .package(
     url: "https://github.com/thatfactory/cloudsavekit.git",
-    from: "0.1.1"
+    from: "0.2.4"
 )
 ```
 
@@ -90,6 +90,8 @@ try await engine.syncNow()
 
 Automatic synchronization should remain enabled in production. Explicit operations complement the system scheduler; they do not replace durable local saves or make offline networking possible.
 
+For a complete integration checklist, including application capabilities, signing verification, durable-state requirements, shared-zone rules, explicit-operation semantics, and diagnostic guidance, read the [CloudSaveKit documentation](https://thatfactory.github.io/cloudsavekit/documentation/cloudsavekit/).
+
 Explicit operations are serialized per engine. An explicit fetch waits for any fetch already active when the request arrives, then requires a fetch generation that began after the request before reporting success. Because CKSyncEngine completes its API call only after related delegate events finish, success is both a freshness barrier and an apply barrier for the configured zone. A post-request automatic fetch may satisfy the barrier; a pre-request fetch cannot. `freshFetchNotObserved` is raised instead of reporting false success if CKSyncEngine returns without a qualifying generation. A configured-zone fetch error also fails its qualifying explicit request. Privacy-safe stage logs report database discovery, configured-zone delivery counts, per-zone completion, and dirty-state transitions without exposing zone or record identities.
 
 Call `start()` successfully before any explicit synchronization. `fetchNow()` and `sendNow()` throw `CloudSaveEngineError.notStarted` before startup and `CloudSaveEngineError.hostRecoveryRequired` after a host persistence callback fails. Once the local store is healthy again, call `start()` to rebuild from the last successfully persisted CKSyncEngine checkpoint and the host's current durable pending-change ledger.
@@ -128,4 +130,6 @@ CloudSaveKit logs concise synchronization lifecycle information through [AppLogg
 - Swift 6.4
 - Xcode 27
 - iOS, macOS, tvOS, watchOS, or visionOS 26+
-- A CloudKit container with CloudKit and Remote Notifications capabilities
+- A CloudKit container and deployed record schema for the intended environment
+- iCloud with CloudKit, Push Notifications, and the Remote notifications background mode on application targets
+- A signed physical-device build whose application entitlements and provisioning profile contain the expected iCloud container and APNs environment
