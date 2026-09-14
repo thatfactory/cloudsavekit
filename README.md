@@ -40,7 +40,7 @@ Add CloudSaveKit to your package dependencies:
 ```swift
 .package(
     url: "https://github.com/thatfactory/cloudsavekit.git",
-    from: "0.2.4"
+    from: "0.2.5"
 )
 ```
 
