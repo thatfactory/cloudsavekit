@@ -23,7 +23,7 @@ Implement ``CloudSaveClient`` in the actor that owns the local store. Its callba
 - ``CloudSaveClient/persist(stateSerialization:)`` stores every opaque CKSyncEngine checkpoint.
 - ``CloudSaveClient/applyFetchedChanges(records:deletedRecordIDs:)`` applies one fetched batch atomically.
 - ``CloudSaveClient/didSave(records:)`` persists returned system fields before acknowledging uploads.
-- ``CloudSaveClient/didDelete(recordIDs:)`` acknowledges remote deletions in the durable ledger.
+- ``CloudSaveClient/didDelete(recordIDs:)`` acknowledges successfully sent local pending deletions after CloudKit reports them in `SentRecordZoneChanges`; fetched deletions arrive through ``CloudSaveClient/applyFetchedChanges(records:deletedRecordIDs:)``.
 - Account, conflict, deleted-zone, and failure callbacks update host-owned state and policy.
 
 Commit application data and its pending ledger entry in one local transaction before calling ``CloudSaveEngine/enqueue(_:)``. Treat the durable ledger, not CKSyncEngine's in-memory queue, as the source of truth across termination and recovery.
@@ -56,7 +56,7 @@ Construct the engine only after restoring the matching checkpoint and durable pe
 
 If a host persistence callback fails, CloudSaveKit invalidates current work and raises ``CloudSaveEngineError/hostRecoveryRequired`` for new explicit operations. Repair the local-store problem and call ``CloudSaveEngine/start()`` again; the engine rebuilds from the last checkpoint that the host successfully persisted and reloads the durable ledger.
 
-Account transitions invalidate old operations before the host switches account-scoped persistence. The host must restore the new account's ledger and checkpoint in ``CloudSaveClient/handle(accountChange:)``. Never allow one account's pending records or checkpoint to enter another account's engine.
+Account transitions invalidate old operations before the host switches account-scoped persistence. In ``CloudSaveClient/handle(accountChange:)``, the host switches or validates account-scoped local persistence and restores the new account's durable pending ledger. The callback cannot replace serialized CKSyncEngine state in the running engine: state serialization is supplied only when constructing ``CloudSaveConfiguration``, and CKSyncEngine performs its own account-change state reset. Never allow one account's pending records or host-bound checkpoint provenance to enter another account's persistence context.
 
 ## Verify the integration
 
