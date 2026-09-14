@@ -14,6 +14,7 @@ public final actor CloudSaveEngine {
     private let ledgerPersistenceLock = CloudSaveAsyncLock()
     private let statePersistenceLock = CloudSaveAsyncLock()
     private let statusContinuation: AsyncStream<CloudSaveStatus>.Continuation
+    private var accountTransitionClassifier: CloudSaveAccountTransitionClassifier
     private var isAccountTransitionPending = false
     private var isHostFailureInvalidationPending = false
     private var lastPersistedStateSerialization: CKSyncEngine.State.Serialization?
@@ -35,6 +36,9 @@ public final actor CloudSaveEngine {
         statusContinuation = statusChannel.continuation
         self.client = client
         self.configuration = configuration
+        accountTransitionClassifier = CloudSaveAccountTransitionClassifier(
+            wasInitializedWithState: configuration.stateSerialization != nil
+        )
         lastPersistedStateSerialization = configuration.stateSerialization
     }
 
@@ -1097,10 +1101,16 @@ extension CloudSaveEngine {
             return
         }
 
+        let shouldInvalidate = accountTransitionClassifier.shouldInvalidate(for: accountChange)
+
         isAccountTransitionPending = true
         needsAccountTransitionLedgerRefresh = false
-        lifecycleGeneration &+= 1
-        await fetchCoordinator.invalidate()
+        if shouldInvalidate {
+            lifecycleGeneration &+= 1
+            await fetchCoordinator.invalidate()
+        } else {
+            CloudSaveLogging.log("account change | phase=initial-sign-in")
+        }
         let accountLifecycleGeneration = lifecycleGeneration
         try await commitPendingChangesMutation { [client] in
             try await client.handle(accountChange: accountChange)

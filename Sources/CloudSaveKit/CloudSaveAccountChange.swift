@@ -11,3 +11,13 @@ public enum CloudSaveAccountChange: Equatable, Sendable {
     /// The device switched directly between two iCloud accounts.
     case switched(previousAccountID: String, currentAccountID: String)
 }
+
+extension CloudSaveAccountChange {
+    /// Whether the transition establishes a signed-in account.
+    var isSignedIn: Bool {
+        if case .signedIn = self {
+            return true
+        }
+        return false
+    }
+}
