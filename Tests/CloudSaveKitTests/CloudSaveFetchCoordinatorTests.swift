@@ -118,16 +118,56 @@ struct CloudSaveFetchCoordinatorTests {
         }
     }
 
-    @Test func olderZoneFailureDoesNotPoisonLaterRequest() async throws {
+    @Test func failedFirstQualifyingGenerationDoesNotPoisonLaterSuccess() async throws {
         let coordinator = CloudSaveFetchCoordinator()
+        let request = try await coordinator.prepareRequest()
         _ = await coordinator.beginFetch()
         await coordinator.failConfiguredZoneFetch()
         _ = await coordinator.completeFetch()
-        let request = try await coordinator.prepareRequest()
 
         _ = await coordinator.beginFetch()
         _ = await coordinator.completeFetch()
 
         try await coordinator.validate(request)
+    }
+
+    @Test func laterFailureDoesNotPoisonEarlierQualifyingSuccess() async throws {
+        let coordinator = CloudSaveFetchCoordinator()
+        let request = try await coordinator.prepareRequest()
+        _ = await coordinator.beginFetch()
+        _ = await coordinator.completeFetch()
+
+        _ = await coordinator.beginFetch()
+        await coordinator.failConfiguredZoneFetch()
+        _ = await coordinator.completeFetch()
+
+        try await coordinator.validate(request)
+    }
+
+    @Test func allCompletedQualifyingGenerationsFailRequest() async throws {
+        let coordinator = CloudSaveFetchCoordinator()
+        let request = try await coordinator.prepareRequest()
+        for _ in 0..<2 {
+            _ = await coordinator.beginFetch()
+            await coordinator.failConfiguredZoneFetch()
+            _ = await coordinator.completeFetch()
+        }
+
+        await #expect(throws: CloudSaveEngineError.configuredZoneFetchFailed) {
+            try await coordinator.validate(request)
+        }
+    }
+
+    @Test func lifecycleInvalidationOutranksSuccessfulGeneration() async throws {
+        let coordinator = CloudSaveFetchCoordinator()
+        let request = try await coordinator.prepareRequest()
+        _ = await coordinator.beginFetch()
+        _ = await coordinator.completeFetch()
+
+        await coordinator.invalidate()
+
+        await #expect(throws: CloudSaveEngineError.hostRecoveryRequired) {
+            try await coordinator.validate(request)
+        }
     }
 }
