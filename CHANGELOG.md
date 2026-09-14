@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.2.4 — 2026-09-14
+
+### Fixed
 
 - Preserve the first explicit fetch across the initial matching sign-in reconciliation of a nil-state engine while retaining lifecycle invalidation for every later account transition.
 
