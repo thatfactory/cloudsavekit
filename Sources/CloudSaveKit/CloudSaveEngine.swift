@@ -153,6 +153,7 @@ public final actor CloudSaveEngine {
 
         let session = try operationalSyncEngine()
         let request = try await fetchCoordinator.prepareRequest()
+        try validate(session)
         CloudSaveLogging.log(
             CloudSaveLogging.fetchRequest(
                 request: request.requestGeneration,
@@ -166,8 +167,8 @@ public final actor CloudSaveEngine {
                 scope: .zoneIDs([configuration.zoneID])
             )
             try await session.syncEngine.fetchChanges(options)
-            try validate(session)
             try await fetchCoordinator.validate(request)
+            try validate(session)
             CloudSaveLogging.log(
                 CloudSaveLogging.fetchRequestSucceeded(request: request.requestGeneration)
             )

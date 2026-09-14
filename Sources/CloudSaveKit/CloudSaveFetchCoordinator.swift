@@ -6,12 +6,14 @@ actor CloudSaveFetchCoordinator {
     private var completedGeneration = 0
     private var fetchGeneration = 0
     private var idleWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+    private var lifecycleGeneration = 0
     private var requestGeneration = 0
 
     /// Records an explicit request and waits for fetches that predate it to drain.
     func prepareRequest() async throws -> Request {
         requestGeneration &+= 1
         let request = Request(
+            lifecycleGeneration: lifecycleGeneration,
             requestGeneration: requestGeneration,
             requiredFetchGeneration: fetchGeneration &+ 1,
             waitedForPriorFetch: !activeFetchGenerations.isEmpty
@@ -46,6 +48,9 @@ actor CloudSaveFetchCoordinator {
 
     /// Verifies that a fetch which began no earlier than the request has completed.
     func validate(_ request: Request) throws {
+        guard request.lifecycleGeneration == lifecycleGeneration else {
+            throw CloudSaveEngineError.hostRecoveryRequired
+        }
         guard completedGeneration >= request.requiredFetchGeneration else {
             throw CloudSaveEngineError.freshFetchNotObserved
         }
@@ -53,6 +58,7 @@ actor CloudSaveFetchCoordinator {
 
     /// Invalidates suspended requests when their engine lifecycle ends.
     func invalidate() {
+        lifecycleGeneration &+= 1
         activeFetchGenerations.removeAll()
         let waiters = idleWaiters.values
         idleWaiters.removeAll()
@@ -67,6 +73,7 @@ actor CloudSaveFetchCoordinator {
 extension CloudSaveFetchCoordinator {
     /// Identifies the minimum qualifying fetch generation for one explicit request.
     struct Request: Equatable, Sendable {
+        let lifecycleGeneration: Int
         let requestGeneration: Int
         let requiredFetchGeneration: Int
         let waitedForPriorFetch: Bool

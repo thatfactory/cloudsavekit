@@ -74,4 +74,34 @@ struct CloudSaveFetchCoordinatorTests {
             try await requestTask.value
         }
     }
+
+    @Test func lifecycleInvalidationPoisonsPreparedRequest() async throws {
+        // Given
+        let coordinator = CloudSaveFetchCoordinator()
+        let request = try await coordinator.prepareRequest()
+
+        // When
+        await coordinator.invalidate()
+
+        // Then
+        await #expect(throws: CloudSaveEngineError.hostRecoveryRequired) {
+            try await coordinator.validate(request)
+        }
+    }
+
+    @Test func lifecycleInvalidationWinsAfterQualifyingFetchCompletes() async throws {
+        // Given
+        let coordinator = CloudSaveFetchCoordinator()
+        let request = try await coordinator.prepareRequest()
+        _ = await coordinator.beginFetch()
+        _ = await coordinator.completeFetch()
+
+        // When
+        await coordinator.invalidate()
+
+        // Then
+        await #expect(throws: CloudSaveEngineError.hostRecoveryRequired) {
+            try await coordinator.validate(request)
+        }
+    }
 }
