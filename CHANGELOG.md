@@ -1,12 +1,23 @@
 # Changelog
 
+All notable changes to CloudSaveKit are documented here.
+
+## 0.2.5 — 2026-09-14
+
+### Documentation
+
+- Added integration, explicit-synchronization, shared-zone, and troubleshooting guides to the public DocC catalog.
+- Documented required CloudKit, Push Notifications, background-mode, signing, and provisioning configuration.
+- Clarified host persistence responsibilities, checkpoint provenance, transfer-count attribution, shared-zone recovery, and two-device acceptance.
+- Updated the package installation example to the current release.
+
+This release contains no public API or runtime behavior changes.
+
 ## 0.2.4 — 2026-09-14
 
 ### Fixed
 
 - Preserve the first explicit fetch across the initial matching sign-in reconciliation of a nil-state engine while retaining lifecycle invalidation for every later account transition.
-
-All notable changes to CloudSaveKit are documented here.
 
 ## 0.2.3 — 2026-09-14
 
