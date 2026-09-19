@@ -1,4 +1,5 @@
-import CloudKit
+import AppLogger
+public import CloudKit
 import Foundation
 
 /// Synchronizes an application's durable local records with a private or shared CloudKit database.
@@ -19,7 +20,7 @@ public final actor CloudSaveEngine {
     private var isHostFailureInvalidationPending = false
     private var lastPersistedStateSerialization: CKSyncEngine.State.Serialization?
     private var ledgerSnapshotTracker = CloudSaveLedgerSnapshotTracker()
-    private var lifecycleTransitionWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+    private var lifecycleTransitionWaiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
     private var lifecycleGeneration = 0
     private var needsAccountTransitionLedgerRefresh = false
     private var requiresReconfiguration = false
@@ -678,7 +679,7 @@ extension CloudSaveEngine {
         let waiterID = UUID()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation {
-                (continuation: CheckedContinuation<Void, Error>) in
+                (continuation: CheckedContinuation<Void, any Error>) in
                 guard !Task.isCancelled else {
                     continuation.resume(throwing: CancellationError())
                     return

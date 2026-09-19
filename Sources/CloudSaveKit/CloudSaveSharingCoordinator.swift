@@ -1,4 +1,4 @@
-import CloudKit
+public import CloudKit
 
 /// Creates, accepts, and discovers zone-wide CloudKit shares without owning presentation UI.
 public actor CloudSaveSharingCoordinator {

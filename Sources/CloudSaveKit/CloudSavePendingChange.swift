@@ -1,4 +1,4 @@
-import CloudKit
+public import CloudKit
 
 /// Describes one locally durable CloudKit change waiting to be sent.
 public enum CloudSavePendingChange: Hashable, Sendable {

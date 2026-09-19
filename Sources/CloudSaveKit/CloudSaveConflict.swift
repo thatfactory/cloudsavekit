@@ -1,4 +1,4 @@
-import CloudKit
+public import CloudKit
 
 /// Contains the three record versions CloudKit provides for conflict resolution.
 public struct CloudSaveConflict: Sendable {
