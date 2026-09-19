@@ -6,7 +6,7 @@ actor CloudSaveFetchCoordinator {
     private var completedGeneration = 0
     private var fetchGeneration = 0
     private var failedFetchGenerations: Set<Int> = []
-    private var idleWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+    private var idleWaiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
     private var latestSuccessfulFetchGeneration = 0
     private var lifecycleGeneration = 0
     private var requestGeneration = 0

@@ -1,4 +1,4 @@
-import CloudKit
+public import CloudKit
 
 /// Connects ``CloudSaveEngine`` to an application's local persistence layer.
 public protocol CloudSaveClient: Sendable {

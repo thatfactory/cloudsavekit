@@ -1,4 +1,4 @@
-import CloudKit
+public import CloudKit
 
 /// Selects how the engine should finish handling a server-record conflict.
 public enum CloudSaveConflictResolution: Sendable {

@@ -1,4 +1,4 @@
-import CloudKit
+public import CloudKit
 import Foundation
 
 /// Configures one private or shared database cloud-save engine.

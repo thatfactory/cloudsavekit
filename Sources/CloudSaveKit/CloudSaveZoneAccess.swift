@@ -1,4 +1,4 @@
-import CloudKit
+public import CloudKit
 
 /// Describes whether the configured record zone is owned by the current account or shared with it.
 public enum CloudSaveZoneAccess: Sendable {
