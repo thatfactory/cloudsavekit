@@ -15,6 +15,7 @@ enum CloudSavePrivateLogging {
     /// Fixed diagnostic tokens that never contain user or CloudKit identifiers.
     enum Outcome: String, CaseIterable {
         case cancelled
+        case drained
         case failed
         case indeterminate
         case integrityFailure = "integrity-failure"

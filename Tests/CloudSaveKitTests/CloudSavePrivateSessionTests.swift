@@ -12,7 +12,8 @@ struct CloudSavePrivateSessionTests {
         let context = CloudSavePrivateSessionContext(
             account: CloudSaveVerifiedAccount(recordName: "account-a", coordinatorID: UUID(), generation: UUID()),
             accountGate: CloudSaveAccessGate(), zoneID: CloudSaveManifestFixture.zoneID,
-            manifestRecordID: CloudSaveManifestFixture.recordID, onInvalidation: { signal.continuation.yield($0) }
+            manifestRecordID: CloudSaveManifestFixture.recordID, validateManifest: { _ in },
+            onInvalidation: { signal.continuation.yield($0) }
         )
         let engine = CloudSaveSessionEngineMock()
         let retirement = CloudSaveTestSuspension()
@@ -192,7 +193,7 @@ struct CloudSavePrivateSessionTests {
         CloudSavePrivateSessionContext(
             account: CloudSaveVerifiedAccount(recordName: account, coordinatorID: UUID(), generation: UUID()),
             accountGate: CloudSaveAccessGate(), zoneID: CloudSaveManifestFixture.zoneID,
-            manifestRecordID: CloudSaveManifestFixture.recordID, onInvalidation: { _ in }
+            manifestRecordID: CloudSaveManifestFixture.recordID, validateManifest: { _ in }, onInvalidation: { _ in }
         )
     }
 }

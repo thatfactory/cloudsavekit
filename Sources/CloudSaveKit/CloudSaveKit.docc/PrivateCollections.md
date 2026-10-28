@@ -16,6 +16,8 @@ An `.invalidated` event means the host must immediately clear visible account co
 
 Only `.verified(account)` supplies a ``CloudSaveVerifiedAccount`` token. Its initializer is internal and it contains coordinator/generation provenance. A stored account string is useful as a local namespace key but cannot recreate verification. Refreshes coalesce while in flight; a later account notification supersedes a suspended query immediately. Every fresh reconciliation invalidates previous tokens and sessions, even if the resolved account is the same.
 
+After immediately emitting invalidation, the coordinator drains admitted host callbacks before resolving the new identity. Retirement barriers remain ordered across overlapping A → B → A notifications, so a returning account cannot read its checkpoint while an earlier generation still writes it. Cancellation of CloudKit operations alone does not establish host-write completion.
+
 ## Bootstrap a neutral schema
 
 This example uses a notebook schema and an integer collection identity. The host's decoder is pure and issues no CloudKit requests:
@@ -74,6 +76,8 @@ try await session.fetchNow()
 
 The supplied client must permanently reference the original local store. Personal sessions never invoke the client's mutable-account rebinding callback. A matching sign-in may restore its ledger; a sign-out, switch, or mismatched sign-in invalidates the session first. Known-zone deletion and `zoneNotFound` are integrity failures: no automatic zone save, local zone-deletion callback, or speculative manifest replacement is permitted. The local mutation ledger must never contain the bootstrap manifest itself.
 
+The session retains the bootstrap's pure decoder and canonical identity. Incoming manifest modifications must still decode to that identity; an unchanged initial delivery is valid. A malformed or contradictory manifest closes the session before any domain record in that fetched batch reaches the host or another pending batch can be sent. Keep the decoder independent of mutable UI or store state.
+
 ``CloudSavePrivateSession/fetchRecord(_:)`` accepts only the configured zone. It returns `nil` for a positively missing record and rejects stale results after suspension or invalidation. The host still validates schema and copies `CKAsset` temporary files into its own durable media transaction. Capture the original store and session across every asynchronous Save, delete, image, sync, and recovery operation. A callback already admitted to the old store may finish there, but must never publish into a replacement user's UI or enqueue on a replacement session.
 
 ## Offline trust and temporary availability
@@ -82,11 +86,15 @@ An ordinary network failure can leave an already verified same-account local col
 
 Temporary account unavailability preserves local data and committed ledger entries, while fencing new CloudKit operations and enqueues. A private session retires its engine when that failure arrives through explicit operations or automatic engine events. `suspend()` and `invalidate()` are terminal for that handle. After account availability is verified again, bootstrap and create a new session from the latest durable checkpoint; there is no mutable resume or account-rebinding operation.
 
+Both retirement methods wait for already-admitted host callbacks. Use one active session per durable account/zone store, and await retirement before reading the checkpoint for a replacement session. This ordering also applies to normal-to-recovery and recovery-to-normal replacement within the same account generation.
+
 ``CloudSavePrivateError`` distinguishes suspension, stale sessions, integrity failures, and transport failures. Task and CloudKit cancellation become `CancellationError`. Transport failures retain only ``CloudSaveFailure`` and optional retry timing, without exposing raw CloudKit user-info payloads. Direct bootstrap/asset requests retain server throttle deadlines across calls and recheck lifecycle after waiting. `CKSyncEngine` continues to own automatic synchronization scheduling and its retries.
+
+Configured-zone fetch errors retain their transport classification through the private facade, including network failure and retry timing. `.hostRecoveryRequired` is reserved for host recovery; `.fetchIncomplete` means the required fresh fetch was not established and `.notStarted` means startup has not completed. An initialized, verified cache may remain usable after an incomplete fetch, but that outcome never establishes the initial-empty readiness barrier.
 
 ## Recovery and notifications
 
-For host-owned checkpoint recovery, verify account and canonical manifest first, open the exact store, and create a session with `automaticallySync: false`. Start, fetch, verify the newly persisted checkpoint, durably mark recovery complete, and only then send pending mutations. Invalidate that recovery session and create a normal session from the recovered checkpoint. Keep quarantine processing and local pending writes intact.
+For host-owned checkpoint recovery, verify account and canonical manifest first, open the exact store, and create a session with `automaticallySync: false`. Start, fetch, verify the newly persisted checkpoint, durably mark recovery complete, and only then send pending mutations. Await invalidation of that recovery session before rereading its durable checkpoint and creating a normal session. Keep quarantine processing and local pending writes intact.
 
 The package does not install a second database subscription or notification pipeline. `CKSyncEngine` retains that ownership. The application supplies platform entitlements and signing, including any tvOS current-user capability, and is responsible for real profile-switch acceptance. Credential-free package tests do not establish device account isolation or delivery of system notifications.
 

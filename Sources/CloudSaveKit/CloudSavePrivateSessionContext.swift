@@ -5,21 +5,26 @@ import Foundation
 final class CloudSavePrivateSessionContext: Sendable {
     let account: CloudSaveVerifiedAccount
     let accountGate: CloudSaveAccessGate
-    let sessionGate = CloudSaveAccessGate()
+    let sessionGate: CloudSaveAccessGate
     let zoneID: CKRecordZone.ID
     let manifestRecordID: CKRecord.ID
+    let validateManifest: @Sendable (CKRecord) throws -> Void
     let onInvalidation: @Sendable (CloudSavePrivateError) async -> Void
 
     /// Captures the exact verified generation and host topology for this session's lifetime.
     init(
         account: CloudSaveVerifiedAccount, accountGate: CloudSaveAccessGate,
+        sessionGate: CloudSaveAccessGate = CloudSaveAccessGate(),
         zoneID: CKRecordZone.ID, manifestRecordID: CKRecord.ID,
+        validateManifest: @escaping @Sendable (CKRecord) throws -> Void,
         onInvalidation: @escaping @Sendable (CloudSavePrivateError) async -> Void
     ) {
         self.account = account
         self.accountGate = accountGate
+        self.sessionGate = sessionGate
         self.zoneID = zoneID
         self.manifestRecordID = manifestRecordID
+        self.validateManifest = validateManifest
         self.onInvalidation = onInvalidation
     }
 
@@ -27,6 +32,35 @@ final class CloudSavePrivateSessionContext: Sendable {
     func check() throws {
         try accountGate.check()
         try sessionGate.check()
+    }
+
+    /// Tracks every admitted host callback across both session retirement and account generations.
+    func withClientCallback<Value: Sendable>(
+        _ operation: @Sendable () async throws -> Value
+    ) async throws -> Value {
+        try accountGate.beginCallback()
+        defer { accountGate.endCallback() }
+        try sessionGate.beginCallback()
+        defer { sessionGate.endCallback() }
+        let value = try await operation()
+        try check()
+        return value
+    }
+
+    /// Rejects manifest drift before applying any domain record in the same batch.
+    func validateFetchedChanges(records: [CKRecord], deletedRecordIDs: [CKRecord.ID]) throws {
+        try check()
+        do {
+            if deletedRecordIDs.contains(manifestRecordID) {
+                throw CloudSavePrivateError.missingTrustedManifest
+            }
+            for record in records where record.recordID == manifestRecordID {
+                try validateManifest(record)
+            }
+        } catch let reason as CloudSavePrivateError {
+            sessionGate.close(reason)
+            throw reason
+        }
     }
 
     /// Only a matching sign-in may reconcile the original client's durable ledger.
@@ -48,6 +82,15 @@ final class CloudSavePrivateSessionContext: Sendable {
 
     /// Extracts fatal account/zone failures before engine retry or destructive recovery callbacks.
     func validateTransportError(_ error: any Error) throws {
+        if let reason = error as? CloudSavePrivateError {
+            switch reason {
+            case .accountTemporarilyUnavailable, .sessionInvalidated, .missingTrustedManifest,
+                .manifestIdentityMismatch, .malformedManifest:
+                throw reason
+            default:
+                break
+            }
+        }
         let cloudError = error as? CKError
         switch cloudError?.code {
         case .accountTemporarilyUnavailable: throw CloudSavePrivateError.accountTemporarilyUnavailable

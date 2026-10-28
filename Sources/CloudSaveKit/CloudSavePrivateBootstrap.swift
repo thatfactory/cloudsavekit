@@ -7,4 +7,5 @@ public struct CloudSavePrivateBootstrap<Value: Sendable>: Sendable {
     public let zoneID: CKRecordZone.ID
     public let value: Value
     let manifestRecordID: CKRecord.ID
+    let validateManifest: @Sendable (CKRecord) throws -> Void
 }

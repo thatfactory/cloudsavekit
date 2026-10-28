@@ -182,7 +182,7 @@ public final actor CloudSaveEngine {
                 scope: .zoneIDs([configuration.zoneID])
             )
             try await session.syncEngine.fetchChanges(options)
-            try await fetchCoordinator.validate(request)
+            try await fetchCoordinator.validate(request, preservingTransportError: configuration.privateSession != nil)
             try validate(session)
             CloudSaveLogging.log(
                 CloudSaveLogging.fetchState(
@@ -502,8 +502,8 @@ extension CloudSaveEngine {
                     break
                 }
                 CloudSaveLogging.log(CloudSaveLogging.configuredZoneFetchCompleted(error: event.error))
-                if event.error != nil {
-                    await fetchCoordinator.failConfiguredZoneFetch()
+                if let error = event.error {
+                    await fetchCoordinator.failConfiguredZoneFetch(error: error)
                 }
             @unknown default:
                 CloudSaveLogging.log(
@@ -1547,9 +1547,9 @@ extension CloudSaveEngine {
                 throw CloudSavePrivateError.missingTrustedManifest
             }
         case .fetchedRecordZoneChanges(let event):
-            if event.deletions.contains(where: { $0.recordID == context.manifestRecordID }) {
-                throw CloudSavePrivateError.missingTrustedManifest
-            }
+            try context.validateFetchedChanges(
+                records: event.modifications.map(\.record), deletedRecordIDs: event.deletions.map(\.recordID)
+            )
         case .didFetchRecordZoneChanges(let event):
             if event.zoneID == context.zoneID, let error = event.error { try context.validateTransportError(error) }
         case .sentDatabaseChanges(let event):
@@ -1577,7 +1577,11 @@ extension CloudSaveEngine {
         lifecycleGeneration &+= 1
         let retiredEngine = storedSyncEngine
         storedSyncEngine = nil
-        let failure: CloudSaveFailure = reason == .missingTrustedManifest ? .zoneUnavailable : .accountUnavailable
+        let failure: CloudSaveFailure =
+            switch reason {
+            case .missingTrustedManifest, .manifestIdentityMismatch, .malformedManifest: .zoneUnavailable
+            default: .accountUnavailable
+            }
         stateMachine.fail(failure, context: .zone(configuration.zoneID))
         publishStatus(syncEngine: nil)
         CloudSavePrivateLogging.emit(.engine, CloudSavePrivateLogging.outcome(reason))

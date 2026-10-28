@@ -13,20 +13,14 @@ public final actor CloudSavePrivateSession {
 
     /// Creates the package-owned engine with fixed-account and trusted-manifest policies.
     init(
-        account: CloudSaveVerifiedAccount, accountGate: CloudSaveAccessGate,
-        zoneID: CKRecordZone.ID, manifestRecordID: CKRecord.ID,
+        context: CloudSavePrivateSessionContext,
         database: CKDatabase, stateSerialization: CKSyncEngine.State.Serialization?,
         client: any CloudSaveClient, automaticallySync: Bool,
-        transport: any CloudSavePrivateTransport, requests: CloudSavePrivateRequestGate,
-        onInvalidation: @escaping @Sendable (CloudSavePrivateError) async -> Void
+        transport: any CloudSavePrivateTransport, requests: CloudSavePrivateRequestGate
     ) {
-        let context = CloudSavePrivateSessionContext(
-            account: account, accountGate: accountGate, zoneID: zoneID,
-            manifestRecordID: manifestRecordID, onInvalidation: onInvalidation
-        )
         var configuration = CloudSaveConfiguration(
             database: database, stateSerialization: stateSerialization,
-            zone: CKRecordZone(zoneID: zoneID), automaticallySync: automaticallySync
+            zone: CKRecordZone(zoneID: context.zoneID), automaticallySync: automaticallySync
         )
         configuration.privateSession = context
         let engine = CloudSaveEngine(
@@ -86,9 +80,15 @@ public final actor CloudSavePrivateSession {
         }
         let identifier = UUID()
         let task = Task { [requests, transport, context] in
-            try await requests.perform(validate: { try context.check() }) {
+            let record = try await requests.perform(validate: { try context.check() }) {
                 try await transport.fetchRecord(recordID)
             }
+            if recordID == context.manifestRecordID {
+                try context.validateFetchedChanges(
+                    records: record.map { [$0] } ?? [], deletedRecordIDs: record == nil ? [recordID] : []
+                )
+            }
+            return record
         }
         recordRequests[identifier] = task
         defer { recordRequests[identifier] = nil }
@@ -135,6 +135,7 @@ public final actor CloudSavePrivateSession {
     /// Closes gates first; cancellation never controls which account can publish a result.
     private func retire(reason: CloudSavePrivateError) async {
         guard !isRetired else {
+            await context.sessionGate.waitForCallbacks()
             return
         }
         isRetired = true
@@ -145,5 +146,7 @@ public final actor CloudSavePrivateSession {
         recordRequests.removeAll()
         CloudSavePrivateLogging.emit(.session, CloudSavePrivateLogging.outcome(reason))
         await engine.retire()
+        await context.sessionGate.waitForCallbacks()
+        CloudSavePrivateLogging.emit(.session, .drained)
     }
 }

@@ -6,6 +6,7 @@ actor CloudSaveFetchCoordinator {
     private var completedGeneration = 0
     private var fetchGeneration = 0
     private var failedFetchGenerations: Set<Int> = []
+    private var transportErrors: [Int: any Error] = [:]
     private var idleWaiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
     private var latestSuccessfulFetchGeneration = 0
     private var lifecycleGeneration = 0
@@ -54,15 +55,16 @@ actor CloudSaveFetchCoordinator {
     }
 
     /// Marks the active fetch generation as failed for the configured zone.
-    func failConfiguredZoneFetch() {
+    func failConfiguredZoneFetch(error: (any Error)? = nil) {
         guard let generation = activeFetchGenerations.first else {
             return
         }
         failedFetchGenerations.insert(generation)
+        if transportErrors[generation] == nil { transportErrors[generation] = error }
     }
 
     /// Verifies that a fetch which began no earlier than the request has completed.
-    func validate(_ request: Request) throws {
+    func validate(_ request: Request, preservingTransportError: Bool = false) throws {
         guard request.lifecycleGeneration == lifecycleGeneration else {
             throw CloudSaveEngineError.hostRecoveryRequired
         }
@@ -72,6 +74,14 @@ actor CloudSaveFetchCoordinator {
         guard completedGeneration >= request.requiredFetchGeneration else {
             throw CloudSaveEngineError.freshFetchNotObserved
         }
+        if preservingTransportError,
+            let generation = transportErrors.keys.filter({
+                $0 >= request.requiredFetchGeneration && $0 <= completedGeneration
+            }).max(),
+            let error = transportErrors[generation]
+        {
+            throw error
+        }
         throw CloudSaveEngineError.configuredZoneFetchFailed
     }
 
@@ -80,6 +90,7 @@ actor CloudSaveFetchCoordinator {
         lifecycleGeneration &+= 1
         activeFetchGenerations.removeAll()
         failedFetchGenerations.removeAll()
+        transportErrors.removeAll()
         latestSuccessfulFetchGeneration = 0
         let waiters = idleWaiters.values
         idleWaiters.removeAll()

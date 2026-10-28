@@ -9,6 +9,7 @@ All notable changes to CloudSaveKit are documented here.
 - Added `CloudSavePrivateCoordinator` with package-owned container creation, account notifications, verified account tokens, and coalesced exact-manifest provisioning.
 - Added conditional manifest creation, canonical-winner rereads, trusted-identity validation, cancellable record/asset transport, and server retry timing without a second synchronization scheduler.
 - Added immutable `CloudSavePrivateSession` handles over the existing engine, terminal suspension/invalidation, and normalized private-session errors.
+- Added host-callback retirement barriers across account generations and recovery replacements, active manifest-identity validation, and preserved configured-zone transport failures for trusted offline use.
 - Added deterministic neutral-schema tests for concurrent creators, interrupted provisioning, lost acknowledgements, stale identity/asset/ledger results, A → B → A isolation, and pending writes across temporary unavailability.
 - Documented personal-store integration, cold-launch offline trust, checkpoint recovery ordering, and privacy-safe lifecycle diagnostics.
 

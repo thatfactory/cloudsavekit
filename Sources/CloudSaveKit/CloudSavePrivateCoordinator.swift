@@ -12,7 +12,9 @@ public actor CloudSavePrivateCoordinator {
     private let changes: AsyncStream<Void>
     private let notifications: CloudSaveAccountNotifications?
     private let requests: CloudSavePrivateRequestGate
+    private let onCallbackDrainWait: @Sendable () -> Void
     private var monitor: Task<Void, Never>?
+    private var callbackRetirement: Task<Void, Never>?
     private var accountGate = CloudSaveAccessGate()
     private var generation = UUID()
     private var verifiedAccount: CloudSaveVerifiedAccount?
@@ -29,6 +31,7 @@ public actor CloudSavePrivateCoordinator {
         self.notifications = notifications
         changes = notifications.changes
         requests = CloudSavePrivateRequestGate()
+        onCallbackDrainWait = {}
         let channel = AsyncStream<CloudSaveAccountEvent>.makeStream()
         accountEvents = channel.stream
         continuation = channel.continuation
@@ -38,11 +41,13 @@ public actor CloudSavePrivateCoordinator {
     init(
         transport: any CloudSavePrivateTransport,
         changes: AsyncStream<Void> = AsyncStream { $0.finish() },
-        requests: CloudSavePrivateRequestGate = CloudSavePrivateRequestGate()
+        requests: CloudSavePrivateRequestGate = CloudSavePrivateRequestGate(),
+        onCallbackDrainWait: @escaping @Sendable () -> Void = {}
     ) {
         self.transport = transport
         self.changes = changes
         self.requests = requests
+        self.onCallbackDrainWait = onCallbackDrainWait
         database = nil
         notifications = nil
         let channel = AsyncStream<CloudSaveAccountEvent>.makeStream()
@@ -97,7 +102,7 @@ public actor CloudSavePrivateCoordinator {
         recordName: String,
         expectedIdentity: Value?,
         makeInitialRecord: @escaping @Sendable (CKRecord.ID) throws -> CKRecord,
-        decodeIdentity: @Sendable (CKRecord) throws -> Value
+        decodeIdentity: @escaping @Sendable (CKRecord) throws -> Value
     ) async throws -> CloudSavePrivateBootstrap<Value> {
         try validate(account)
         let recordID = CKRecord.ID(recordName: recordName, zoneID: CKRecordZone.ID(zoneName: zoneName))
@@ -133,7 +138,15 @@ public actor CloudSavePrivateCoordinator {
             }
             CloudSavePrivateLogging.emit(.bootstrap, .verified)
             return CloudSavePrivateBootstrap(
-                account: account, zoneID: recordID.zoneID, value: identity, manifestRecordID: recordID
+                account: account, zoneID: recordID.zoneID, value: identity, manifestRecordID: recordID,
+                validateManifest: { record in
+                    guard record.recordType == recordType, record.recordID == recordID else {
+                        throw CloudSavePrivateError.malformedManifest
+                    }
+                    let incoming: Value
+                    do { incoming = try decodeIdentity(record) } catch { throw CloudSavePrivateError.malformedManifest }
+                    guard incoming == identity else { throw CloudSavePrivateError.manifestIdentityMismatch }
+                }
             )
         } catch {
             let failure = CloudSavePrivateError.normalize(error)
@@ -157,17 +170,28 @@ public actor CloudSavePrivateCoordinator {
             throw CloudSavePrivateError.transport(.configuration, retryAfterSeconds: nil)
         }
         let session = CloudSavePrivateSession(
-            account: bootstrap.account, accountGate: accountGate,
-            zoneID: bootstrap.zoneID, manifestRecordID: bootstrap.manifestRecordID,
+            context: try sessionContext(for: bootstrap),
             database: database, stateSerialization: stateSerialization, client: client,
-            automaticallySync: automaticallySync, transport: transport, requests: requests,
-            onInvalidation: { [weak self] reason in
-                await self?.sessionInvalidated(reason, generation: bootstrap.account.generation)
-            }
+            automaticallySync: automaticallySync, transport: transport, requests: requests
         )
         sessions.removeAll { $0.value == nil }
         sessions.append(WeakSession(value: session))
         return session
+    }
+
+    /// Shares the real generation gate and manifest policy with the engine and deterministic tests.
+    func sessionContext<Value: Sendable>(
+        for bootstrap: CloudSavePrivateBootstrap<Value>
+    ) throws -> CloudSavePrivateSessionContext {
+        try validate(bootstrap.account)
+        return CloudSavePrivateSessionContext(
+            account: bootstrap.account, accountGate: accountGate,
+            zoneID: bootstrap.zoneID, manifestRecordID: bootstrap.manifestRecordID,
+            validateManifest: bootstrap.validateManifest,
+            onInvalidation: { [weak self] reason in
+                await self?.sessionInvalidated(reason, generation: bootstrap.account.generation)
+            }
+        )
     }
 
     // MARK: - Private
@@ -181,10 +205,11 @@ public actor CloudSavePrivateCoordinator {
     }
 
     /// Fences every old session synchronously and publishes invalidation before cancellation awaits.
-    private func beginRevalidation() {
+    private func beginRevalidation() -> CloudSaveAccessGate {
+        let retiredGate = accountGate
         accountGate.close()
         generation = UUID()
-        accountGate = CloudSaveAccessGate()
+        accountGate = CloudSaveAccessGate(onDrainWait: onCallbackDrainWait)
         verifiedAccount = nil
         for task in bootstraps.values {
             task.cancel()
@@ -195,6 +220,7 @@ public actor CloudSavePrivateCoordinator {
         continuation.yield(.invalidated)
         CloudSavePrivateLogging.emit(.account, .invalidated)
         Task { for session in oldSessions { await session.invalidate() } }
+        return retiredGate
     }
 
     /// Resolves availability and identity only in the generation that initiated the request.
@@ -269,9 +295,19 @@ public actor CloudSavePrivateCoordinator {
 
     /// Starts verification without blocking consumption of later account notifications.
     private func startRefresh() -> (id: UUID, task: Task<CloudSaveAccountSnapshot, any Error>) {
-        beginRevalidation()
+        let retiredGate = beginRevalidation()
         let identifier = generation
-        let task = Task { try await self.resolveAccount(generation: identifier) }
+        let previousRetirement = callbackRetirement
+        let retirement = Task {
+            await previousRetirement?.value
+            await retiredGate.waitForCallbacks()
+            CloudSavePrivateLogging.emit(.account, .drained)
+        }
+        callbackRetirement = retirement
+        let task = Task {
+            await retirement.value
+            return try await self.resolveAccount(generation: identifier)
+        }
         let work = (id: identifier, task: task)
         refresh = work
         return work

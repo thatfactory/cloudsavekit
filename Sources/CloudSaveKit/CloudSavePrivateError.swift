@@ -4,10 +4,12 @@ import Foundation
 /// Normalized private-session failures; hosts never need to interpret CloudKit error codes.
 public enum CloudSavePrivateError: Error, Equatable, Sendable {
     case accountTemporarilyUnavailable
+    case fetchIncomplete
     case hostRecoveryRequired
     case malformedManifest
     case manifestIdentityMismatch
     case missingTrustedManifest
+    case notStarted
     case sessionInvalidated
     case suspended
     case transport(CloudSaveFailure, retryAfterSeconds: Double?)
@@ -16,7 +18,7 @@ public enum CloudSavePrivateError: Error, Equatable, Sendable {
     /// Whether a verified same-account local cache may remain usable after this failure.
     public var permitsOfflineUse: Bool {
         switch self {
-        case .accountTemporarilyUnavailable, .suspended, .transport(.networkUnavailable, _): true
+        case .accountTemporarilyUnavailable, .fetchIncomplete, .suspended, .transport(.networkUnavailable, _): true
         default: false
         }
     }
@@ -29,8 +31,13 @@ public enum CloudSavePrivateError: Error, Equatable, Sendable {
         if CloudSaveRetryPolicy.isCancellation(error) {
             return CancellationError()
         }
-        if error is CloudSaveEngineError {
-            return Self.hostRecoveryRequired
+        if let error = error as? CloudSaveEngineError {
+            return switch error {
+            case .hostRecoveryRequired: Self.hostRecoveryRequired
+            case .reconfigurationRequired: Self.missingTrustedManifest
+            case .freshFetchNotObserved, .configuredZoneFetchFailed: Self.fetchIncomplete
+            case .notStarted: Self.notStarted
+            }
         }
         let cloudError = error as? CKError
         if cloudError?.code == .accountTemporarilyUnavailable {

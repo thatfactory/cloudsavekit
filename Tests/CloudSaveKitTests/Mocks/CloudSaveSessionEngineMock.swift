@@ -6,6 +6,7 @@ import Foundation
 actor CloudSaveSessionEngineMock: CloudSaveSessionEngine {
     nonisolated let statusUpdates = AsyncStream<CloudSaveStatus> { $0.finish() }
     private let client: (any CloudSaveClient)?
+    private let fetch: @Sendable () async throws -> Void
     private var sendError: (any Error)?
     private var retirement: CloudSaveTestSuspension?
     private(set) var restored: [CloudSavePendingChange] = []
@@ -14,7 +15,10 @@ actor CloudSaveSessionEngineMock: CloudSaveSessionEngine {
     private(set) var sendCount = 0
 
     /// Optionally restores an actual guarded client's ledger through the same persistence seam.
-    init(client: (any CloudSaveClient)? = nil) { self.client = client }
+    init(client: (any CloudSaveClient)? = nil, fetch: @escaping @Sendable () async throws -> Void = {}) {
+        self.client = client
+        self.fetch = fetch
+    }
 
     /// Injects an engine transport failure.
     func failSend(_ error: any Error) { sendError = error }
@@ -26,7 +30,7 @@ actor CloudSaveSessionEngineMock: CloudSaveSessionEngine {
     func start() async throws { restored = try await client?.pendingChanges() ?? [] }
 
     /// Completes a test fetch without network work.
-    func fetchNow() {}
+    func fetchNow() async throws { try await fetch() }
 
     /// Emits the configured send failure before acknowledgements.
     func sendNow() throws {
