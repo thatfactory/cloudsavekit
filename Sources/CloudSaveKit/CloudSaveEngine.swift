@@ -49,6 +49,7 @@ public final actor CloudSaveEngine {
 
     /// Initializes CKSyncEngine and restores every locally durable pending change.
     public func start() async throws {
+        try configuration.privateSession?.check()
         try await waitForPendingLifecycleTransition()
         guard !requiresReconfiguration else {
             throw CloudSaveEngineError.reconfigurationRequired
@@ -70,6 +71,7 @@ public final actor CloudSaveEngine {
             throw error
         }
 
+        try configuration.privateSession?.check()
         guard lifecycleGeneration == startingLifecycleGeneration else {
             throw CloudSaveEngineError.hostRecoveryRequired
         }
@@ -78,7 +80,7 @@ public final actor CloudSaveEngine {
         storedSyncEngine = engine
         stateMachine.resolve(.hostPersistence)
 
-        if lastPersistedStateSerialization == nil,
+        if configuration.privateSession == nil, lastPersistedStateSerialization == nil,
             let zone = configuration.zoneAccess.ownedZone
         {
             engine.state.add(
@@ -102,6 +104,7 @@ public final actor CloudSaveEngine {
 
     /// Adds locally durable changes to CKSyncEngine's pending state.
     public func enqueue(_ changes: [CloudSavePendingChange]) {
+        guard privateSessionIsActive else { return }
         let configuredChanges = changes.filter {
             isInConfiguredZone($0.recordID)
         }
@@ -302,6 +305,18 @@ public final actor CloudSaveEngine {
         stateMachine.resetActiveOperations()
         publishStatus(syncEngine: storedSyncEngine)
     }
+
+    /// Permanently detaches this engine before awaiting cancellation; personal sessions never restart it.
+    func retire() async {
+        configuration.privateSession?.sessionGate.close()
+        lifecycleGeneration &+= 1
+        let retiredEngine = storedSyncEngine
+        storedSyncEngine = nil
+        await fetchCoordinator.invalidate()
+        await retiredEngine?.cancelOperations()
+        stateMachine.resetActiveOperations()
+        publishStatus(syncEngine: nil)
+    }
 }
 
 // MARK: - CKSyncEngineDelegate
@@ -323,7 +338,7 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
         _ context: CKSyncEngine.SendChangesContext,
         syncEngine: CKSyncEngine
     ) async -> CKSyncEngine.RecordZoneChangeBatch? {
-        guard !requiresReconfiguration,
+        guard privateSessionIsActive, !requiresReconfiguration,
             !isLifecycleTransitionPending,
             storedSyncEngine === syncEngine,
             !stateMachine.requiresHostRecovery
@@ -395,6 +410,11 @@ extension CloudSaveEngine {
         _ event: CKSyncEngine.Event,
         syncEngine: CKSyncEngine
     ) async {
+        guard storedSyncEngine === syncEngine else { return }
+        do { try validatePrivateEvent(event) } catch let reason as CloudSavePrivateError {
+            retirePrivateEngine(reason: reason)
+            return
+        } catch { return }
         guard !requiresReconfiguration,
             !isLifecycleTransitionPending,
             storedSyncEngine === syncEngine
@@ -491,6 +511,8 @@ extension CloudSaveEngine {
                     "event | unknown"
                 )
             }
+        } catch let reason as CloudSavePrivateError {
+            retirePrivateEngine(reason: reason)
         } catch CloudSaveEngineError.reconfigurationRequired {
             if isAccountTransitionPending {
                 endAccountTransition()
@@ -530,7 +552,7 @@ extension CloudSaveEngine {
         syncEngine: CKSyncEngine,
         lifecycleGeneration: Int
     ) -> Bool {
-        !requiresReconfiguration
+        privateSessionIsActive && !requiresReconfiguration
             && !isLifecycleTransitionPending
             && self.lifecycleGeneration == lifecycleGeneration
             && storedSyncEngine === syncEngine
@@ -554,6 +576,7 @@ extension CloudSaveEngine {
         syncEngine: CKSyncEngine,
         lifecycleGeneration: Int
     ) {
+        try configuration.privateSession?.check()
         guard !requiresReconfiguration,
             !isLifecycleTransitionPending,
             !stateMachine.requiresHostRecovery
@@ -580,6 +603,7 @@ extension CloudSaveEngine {
             lifecycleGeneration: Int
         )
     ) throws {
+        try configuration.privateSession?.check()
         guard !isLifecycleTransitionPending,
             session.lifecycleGeneration == lifecycleGeneration,
             storedSyncEngine === session.syncEngine,
@@ -596,6 +620,7 @@ extension CloudSaveEngine {
             lifecycleGeneration: Int
         )
     ) throws {
+        try configuration.privateSession?.check()
         guard
             isLifecycleTransitionPending
                 || session.lifecycleGeneration != lifecycleGeneration
@@ -978,7 +1003,7 @@ extension CloudSaveEngine {
         syncEngine: CKSyncEngine,
         allowsAccountTransition: Bool = false
     ) -> Bool {
-        !isHostFailureInvalidationPending
+        privateSessionIsActive && !isHostFailureInvalidationPending
             && (allowsAccountTransition || !isAccountTransitionPending)
             && snapshot.belongs(
                 to: lifecycleGeneration,
@@ -992,6 +1017,10 @@ extension CloudSaveEngine {
     fileprivate func restoreFailedZoneChangeIfNeeded(syncEngine: CKSyncEngine) throws {
         guard stateMachine.requiresRecovery(for: configuration.zoneID) else {
             return
+        }
+
+        guard configuration.privateSession == nil else {
+            throw CloudSavePrivateError.missingTrustedManifest
         }
 
         guard let zone = configuration.zoneAccess.ownedZone else {
@@ -1012,9 +1041,11 @@ extension CloudSaveEngine {
 
         guard case .signedOut = accountChange else {
             let ledgerSnapshot = try await readPendingChangesSnapshot()
-            syncEngine.state.add(
-                pendingDatabaseChanges: configuration.zoneAccess.accountTransitionDatabaseChanges
-            )
+            if configuration.privateSession == nil {
+                syncEngine.state.add(
+                    pendingDatabaseChanges: configuration.zoneAccess.accountTransitionDatabaseChanges
+                )
+            }
             guard
                 restoreDurablePendingChanges(
                     ledgerSnapshot,
@@ -1066,6 +1097,10 @@ extension CloudSaveEngine {
             return
         }
 
+        guard configuration.privateSession == nil else {
+            throw CloudSavePrivateError.missingTrustedManifest
+        }
+
         guard let zone = configuration.zoneAccess.ownedZone else {
             requiresReconfiguration = true
             throw CloudSaveEngineError.reconfigurationRequired
@@ -1101,6 +1136,8 @@ extension CloudSaveEngine {
             )
             return
         }
+
+        try configuration.privateSession?.validate(accountChange)
 
         let shouldInvalidate = accountTransitionClassifier.shouldInvalidate(for: accountChange)
 
@@ -1482,5 +1519,72 @@ extension CloudSaveEngine {
     /// Filters custom-zone events to the zone owned by this engine.
     fileprivate func isInConfiguredZone(_ zoneID: CKRecordZone.ID) -> Bool {
         zoneID == configuration.zoneID
+    }
+}
+
+// MARK: - Private Session
+
+/// Enforces opt-in personal-session policies before the existing engine handles an event.
+extension CloudSaveEngine {
+    /// Whether both immutable session gates still permit synchronization.
+    var privateSessionIsActive: Bool {
+        guard let context = configuration.privateSession else { return true }
+        return (try? context.check()) != nil
+    }
+
+    /// Rejects account transitions and trusted topology loss before host callbacks or retries.
+    func validatePrivateEvent(_ event: CKSyncEngine.Event) throws {
+        guard let context = configuration.privateSession else { return }
+        try context.check()
+        switch event {
+        case .accountChange(let event):
+            guard let change = event.cloudSaveAccountChange else {
+                throw CloudSavePrivateError.sessionInvalidated
+            }
+            try context.validate(change)
+        case .fetchedDatabaseChanges(let event):
+            if event.deletions.contains(where: { $0.zoneID == context.zoneID }) {
+                throw CloudSavePrivateError.missingTrustedManifest
+            }
+        case .fetchedRecordZoneChanges(let event):
+            if event.deletions.contains(where: { $0.recordID == context.manifestRecordID }) {
+                throw CloudSavePrivateError.missingTrustedManifest
+            }
+        case .didFetchRecordZoneChanges(let event):
+            if event.zoneID == context.zoneID, let error = event.error { try context.validateTransportError(error) }
+        case .sentDatabaseChanges(let event):
+            for failure in event.failedZoneSaves where failure.zone.zoneID == context.zoneID {
+                try context.validateTransportError(failure.error)
+            }
+            for (zoneID, error) in event.failedZoneDeletes where zoneID == context.zoneID {
+                try context.validateTransportError(error)
+            }
+        case .sentRecordZoneChanges(let event):
+            for failure in event.failedRecordSaves where failure.record.recordID.zoneID == context.zoneID {
+                try context.validateTransportError(failure.error)
+            }
+            for (recordID, error) in event.failedRecordDeletes where recordID.zoneID == context.zoneID {
+                try context.validateTransportError(error)
+            }
+        default: break
+        }
+    }
+
+    /// Detaches immediately; cancellation runs outside delegate handling to avoid self-deadlock.
+    func retirePrivateEngine(reason: CloudSavePrivateError) {
+        guard let context = configuration.privateSession, storedSyncEngine != nil else { return }
+        context.sessionGate.close(reason)
+        lifecycleGeneration &+= 1
+        let retiredEngine = storedSyncEngine
+        storedSyncEngine = nil
+        let failure: CloudSaveFailure = reason == .missingTrustedManifest ? .zoneUnavailable : .accountUnavailable
+        stateMachine.fail(failure, context: .zone(configuration.zoneID))
+        publishStatus(syncEngine: nil)
+        CloudSavePrivateLogging.emit(.engine, CloudSavePrivateLogging.outcome(reason))
+        Task {
+            await context.onInvalidation(reason)
+            await fetchCoordinator.invalidate()
+            await retiredEngine?.cancelOperations()
+        }
     }
 }

@@ -6,6 +6,8 @@ Coordinate an application-owned local store with a private or shared CloudKit da
 
 CloudSaveKit wraps Apple's `CKSyncEngine` lifecycle and delegate surface without choosing a local database or record schema. A host provides a ``CloudSaveClient`` that can materialize pending `CKRecord` values, apply fetched changes transactionally, preserve CKSyncEngine state, and resolve conflicts using application semantics.
 
+For a personal collection, start with <doc:PrivateCollections>. ``CloudSavePrivateCoordinator`` owns verified account identity and conditional manifest provisioning; ``CloudSavePrivateSession`` binds the existing engine and exact record transport to one immutable account, zone, and client. The configurable engine behavior below remains available for hosts that intentionally manage rebinding and automatic owned-zone recovery.
+
 Create the engine early in application launch, call ``CloudSaveEngine/start()``, and enqueue changes only after their corresponding local transactions succeed. Observe ``CloudSaveEngine/statusUpdates`` to project synchronization state into the host architecture. The current-state stream begins with ``CloudSaveStatus/idle`` and retains only its latest unconsumed value rather than preserving an event history.
 
 Before integrating the engine, follow <doc:IntegrationGuide> to configure the application target, signing, local-store boundary, and durable state. For user-initiated refresh behavior, see <doc:ExplicitSynchronization>. For private-zone sharing, see <doc:SharingZones>. When server state and device behavior disagree, use <doc:Troubleshooting>.
@@ -21,6 +23,7 @@ CKSyncEngine retains recoverable transport failures and schedules their retries;
 ### Essentials
 
 - <doc:IntegrationGuide>
+- <doc:PrivateCollections>
 - <doc:ExplicitSynchronization>
 - <doc:SharingZones>
 - <doc:Troubleshooting>
@@ -32,6 +35,16 @@ CKSyncEngine retains recoverable transport failures and schedules their retries;
 - ``CloudSaveConfiguration``
 - ``CloudSaveZoneAccess``
 - ``CloudSaveStatus``
+
+### Personal collections
+
+- ``CloudSavePrivateCoordinator``
+- ``CloudSavePrivateSession``
+- ``CloudSaveVerifiedAccount``
+- ``CloudSaveAccountSnapshot``
+- ``CloudSaveAccountEvent``
+- ``CloudSavePrivateBootstrap``
+- ``CloudSavePrivateError``
 
 ### Sharing
 

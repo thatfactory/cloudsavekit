@@ -6,6 +6,8 @@ Configure a host application for durable private or shared CloudKit synchronizat
 
 CloudSaveKit coordinates CKSyncEngine, but the host remains the source of truth for local data. A correct integration combines application capabilities and signing, a durable ``CloudSaveClient``, an owner-aware zone configuration, and lifecycle orchestration that starts synchronization only after account-scoped persistence is ready.
 
+For automatic personal-collection selection, use <doc:PrivateCollections>. That path constructs service objects inside the package, verifies the account before local-store selection, and uses immutable sessions. The direct ``CloudSaveConfiguration`` examples below retain the existing configurable engine contract.
+
 ## Configure the application target
 
 Enable iCloud with CloudKit, select the intended container, enable Push Notifications, and enable the Remote notifications background mode. Deploy the record schema to every CloudKit environment the application will use.
@@ -57,6 +59,8 @@ Construct the engine only after restoring the matching checkpoint and durable pe
 If a host persistence callback fails, CloudSaveKit invalidates current work and raises ``CloudSaveEngineError/hostRecoveryRequired`` for new explicit operations. Repair the local-store problem and call ``CloudSaveEngine/start()`` again; the engine rebuilds from the last checkpoint that the host successfully persisted and reloads the durable ledger.
 
 Account transitions invalidate old operations before the host switches account-scoped persistence. In ``CloudSaveClient/handle(accountChange:)``, the host switches or validates account-scoped local persistence and restores the new account's durable pending ledger. The callback cannot replace serialized CKSyncEngine state in the running engine: state serialization is supplied only when constructing ``CloudSaveConfiguration``, and CKSyncEngine performs its own account-change state reset. Never allow one account's pending records or host-bound checkpoint provenance to enter another account's persistence context.
+
+That mutable-host callback contract applies to directly configured engines. A ``CloudSavePrivateSession`` instead retains the original host client permanently, never invokes its account-rebinding callback, and retires on an account transition. The host observes the coordinator's events and creates a fresh verified session with the new account's store and checkpoint.
 
 ## Verify the integration
 
