@@ -2,6 +2,72 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.0.42] - 2026-10-20
+
+### Changed
+
+- Replaced the explicit-request restriction on Reduce Motion adaptations with Apple-aligned evaluation of individual motion triggers, responsive preference handling, and preservation of useful feedback.
+- Required platform-specific common-task evidence before declaring Reduced Motion support, with re-evaluation on app updates and a link from App Store metadata guidance.
+- Added focused Reduce Motion audit checks, scenario walkthroughs, and validator regression coverage for policy, evidence, and support claims.
+
+## [0.0.41] - 2026-10-20
+
+### Added
+
+- Required reusable custom-styled controls to own smooth visual transitions while functional state changes immediately, preserving native feedback, stable identity, and narrow animation scope.
+- Added display-appropriate image preparation, bounded memory, derivative invalidation, original preservation, and stale-result rejection guidance.
+- Added an animation and image-rendering audit with targeted runtime evidence, honest performance measurements, scenario walkthroughs, and validator mutation coverage. Existing Reduce Motion policy is unchanged.
+
+## [0.0.40] - 2026-10-20
+
+### Added
+
+- Made Apple-owned placement authoritative for standard navigation, dismissal, confirmation, and window controls, with semantic toolbar intent and native Back behavior preserved across platforms.
+- Added a completion-audit check for control ownership, unjustified placement overrides, conflicting design mandates, and relevant interaction evidence.
+- Added the `update-agent-guidelines` skill to persist shared decisions, ask about audit coverage when unspecified, update release metadata, and deliver an authorized reviewed PR and release.
+
+## [0.0.39] - 2026-10-19
+
+### Added
+
+- Added shared Device Hub, physical-device, and simulator guidance covering tool and skill discovery, authorization, signing, keyboard controls, resource coordination, runtime evidence, controlled comparisons, and cleanup.
+- Linked the workflow from Xcode MCP, Development, the guideline catalog, and the consumer instructions template while keeping product-specific environment constraints in consumers.
+
+## [0.0.38] - 2026-10-15
+
+### Added
+
+- Made size-based scroll bounce the SwiftUI `ScrollView` default on supported deployment targets, with axis and environment-scope guidance for nested scrolling and modal sheets.
+- Added a completion-audit check for new or changed `ScrollView` bounce behavior and documented exceptions.
+
+## [0.0.37] - 2026-10-14
+
+### Added
+
+- Made native SwiftUI and platform components the default for supported interactions, with approved durable exceptions required for verified native capability gaps.
+- Defined presentation hierarchy, independent child dismissal, parent draft retention, cancellation, dismissal-completion cleanup, and required runtime interaction evidence.
+- Added a mandatory completion-audit decision check for custom component and presentation lifecycle replacements, with validator and regression coverage.
+
+## [0.0.36] - 2026-10-09
+
+### Added
+
+- Added SwiftUI animation guidance favoring purposeful native feedback, default SwiftUI animation, system transitions, and SF Symbol effects while keeping animations scoped and interactions responsive.
+- Required an explicit task-prompt request before adding app-level Reduce Motion guards, while preserving accessibility behavior supplied automatically by native system components.
+
+## [0.0.35] - 2026-09-27
+
+### Changed
+
+- Require positive repository-specific evidence before automatic Codex review becomes a merge gate. Track configuration separately from current-head execution, default undiscoverable settings to `unknown`, and bound deduplicated start-signal monitoring to five minutes.
+
+## [0.0.34] - 2026-09-20
+
+### Changed
+
+- Required every ThatFactory package emoji to be unique in the Swift Package Collection and synchronized across package documentation, the logging gateway, and the collection registry.
+- Extended the completion audit to block package publication when emoji uniqueness cannot be verified or the registered and emitted identities disagree.
+
 ## [0.0.33] - 2026-09-19
 
 ### Added

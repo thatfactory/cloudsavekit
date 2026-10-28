@@ -2,7 +2,7 @@
 
 ## Context
 
-CloudSaveKit is a pure Swift package that coordinates a host application's durable local store with a private CloudKit database through `CKSyncEngine`. Read [README.md](README.md) and the DocC catalog before changing public behavior.
+CloudSaveKit is a pure Swift package that owns reusable CloudKit account verification, conditional private-manifest bootstrap, exact record transport, and coordination of a host's durable local store through `CKSyncEngine`. It also retains configurable private/shared engine and zone-sharing APIs. Read [README.md](README.md) and the DocC catalog before changing public behavior.
 
 The package is persistence-, UI-, and application-architecture agnostic. Host applications own their local database, record schemas, merge semantics, and user-facing recovery policy.
 
@@ -38,6 +38,7 @@ Redux, SwiftData, SwiftUI, and application-localization guidance do not apply to
 ## Package specialization
 
 - Use `CKSyncEngine` rather than duplicating its scheduling, batching, state tracking, or transient retry behavior.
+- Personal sessions permanently bind one verified account generation, exact zone, and host client. Preserve fail-closed trusted-manifest recovery separately from the existing configurable engine's automatic owned-zone recovery.
 - Do not add a local database, Redux, UI, product record schema, or game-specific conflict policy.
 - Persist every engine state update through the host-provided client boundary.
 - Keep status and errors privacy-safe; never log record contents or identifiers.
@@ -91,7 +92,7 @@ In an initial review, report substantiated blockers together. A follow-up review
 
 The review-round budget below applies only to Codex GitHub reviews: the configured automatic Codex review and any manual `@codex review` request. It does not apply to ChatGPT review or reasoning delegated through Reasoning Relay. An otherwise-authorized Reasoning Relay workflow may request as many Relay review or follow-up delegations as its own governing workflow requires; those requests neither consume the Codex budget nor require repository-owner authorization under it.
 
-Automatic Codex review is the initial Codex review. Do not request a manual Codex review unless the repository owner explicitly asks. Never request another Codex review after each remediation commit. Within the normal Codex review budget, at most one owner-authorized, delta-scoped Codex verification review may be requested under [the pull-request review workflow](AgentGuidelines/Guidelines/GitHub/PullRequests.md).
+When repository-specific evidence establishes that automatic Codex review is enabled and applies to the current pull request/head, it is the initial Codex review. Otherwise, an absent review does not establish a pending gate. Do not request a manual Codex review unless the repository owner explicitly asks. Never request another Codex review after each remediation commit. Within the normal Codex review budget, at most one owner-authorized, delta-scoped Codex verification review may be requested under [the pull-request review workflow](AgentGuidelines/Guidelines/GitHub/PullRequests.md).
 <!-- END THATFACTORY CODE REVIEW CONTRACT v2 -->
 
 ## Codex review scope

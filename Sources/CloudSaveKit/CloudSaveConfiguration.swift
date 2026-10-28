@@ -3,6 +3,8 @@ import Foundation
 
 /// Configures one private or shared database cloud-save engine.
 public struct CloudSaveConfiguration: Sendable {
+    /// Opt-in fixed-account policy used only by package-created personal sessions.
+    var privateSession: CloudSavePrivateSessionContext?
     /// The CloudKit database used by the engine.
     public let database: CKDatabase
 

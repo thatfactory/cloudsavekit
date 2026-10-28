@@ -11,7 +11,7 @@
 
 # CloudSaveKit
 
-A reusable `CKSyncEngine` coordinator for synchronizing app-owned local data with private and shared CloudKit databases. ☁️
+A reusable CloudKit account, private-bootstrap, and `CKSyncEngine` coordinator for app-owned local data. ☁️
 
 ```mermaid
 flowchart LR
@@ -31,6 +31,8 @@ CloudSaveKit owns CloudKit synchronization mechanics while the host application 
 - Schedule automatic synchronization and expose explicit fetch, send, and combined sync operations.
 - Forward fetched changes, account events, saved system fields, and semantic conflicts to the host.
 - Classify failures into privacy-safe values suitable for application state.
+- Verify the current account and invalidate personal sessions before switching local persistence.
+- Provision a canonical private manifest conditionally, reconcile concurrent creators, and fetch exact asset records.
 - Preserve independent record, zone, operation, and host-persistence failures until their exact recovery conditions succeed.
 
 ## Quick start
@@ -40,11 +42,25 @@ Add CloudSaveKit to your package dependencies:
 ```swift
 .package(
     url: "https://github.com/thatfactory/cloudsavekit.git",
-    from: "0.2.6"
+    from: "0.3.0"
 )
 ```
 
-Implement `CloudSaveClient` in the actor that owns your local database, then configure a private CloudKit database and custom zone:
+Implement `CloudSaveClient` in the actor that owns your local database. For one personal collection per account, use `CloudSavePrivateCoordinator`: it constructs the container, observes account changes, verifies identity, and conditionally provisions a generic manifest. Its `CloudSavePrivateSession` permanently binds that account and zone to your client. See the [private collection integration guide](https://thatfactory.github.io/cloudsavekit/documentation/cloudsavekit/privatecollections/) for a complete neutral-schema example and the offline trust contract.
+
+Personal sessions revalidate incoming manifest identities and drain admitted host callbacks during retirement. Await retirement before reading a checkpoint for a replacement session over the same store. Configured-zone network errors retain their transport classification so a verified, initialized cache can remain usable offline; a failed fetch never establishes initial-empty readiness.
+
+```swift
+let coordinator = CloudSavePrivateCoordinator(
+    containerIdentifier: "iCloud.com.example.notebook"
+)
+// Observe coordinator.accountEvents before querying or opening a local store.
+let accountSnapshot = try await coordinator.refreshAccount()
+```
+
+Persist an account-qualified manifest identity, reject mismatched checkpoint provenance, and use the coordinator's `bootstrapManifest` result to create a session. Await `start()` and `fetchNow()` before treating a new local cache as empty. Commit local records, media associations, and their pending mutations before enqueueing; an upload failure does not roll back a successful local Save. A lost trusted manifest or zone is an integrity failure, and personal sessions never recreate it or invoke destructive zone-deletion callbacks.
+
+The existing configurable engine and sharing APIs remain available. For a host that intentionally manages mutable account bindings and automatic owned-zone recovery, configure a database and zone directly:
 
 ```swift
 let container = CKContainer(identifier: "iCloud.com.example.game")

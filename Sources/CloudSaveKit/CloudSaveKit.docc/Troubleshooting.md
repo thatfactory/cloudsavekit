@@ -40,6 +40,8 @@ Verify that participants use `sharedCloudDatabase` and the accepted owner-qualif
 
 ## Startup or recovery fails
 
+For personal sessions, ``CloudSavePrivateError/missingTrustedManifest``, ``CloudSavePrivateError/malformedManifest``, and ``CloudSavePrivateError/manifestIdentityMismatch`` require integrity recovery. Preserve local bytes and do not replace the collection. ``CloudSavePrivateError/sessionInvalidated`` rejects an old account generation; obtain a new verified bootstrap before creating another session. Temporary unavailability pauses cloud work while preserving local writes; see <doc:PrivateCollections> for cold-launch trust and restart ordering.
+
 ``CloudSaveEngineError/notStarted`` means no successful ``CloudSaveEngine/start()`` has completed. ``CloudSaveEngineError/hostRecoveryRequired`` means a client persistence callback failed; repair the local store and restart the engine. ``CloudSaveEngineError/reconfigurationRequired`` means the configured shared topology is no longer available.
 
 Do not fix checkpoint problems by deleting user data, pending mutations, or server system fields. Bind opaque state to host-owned provenance and make any nil-state recovery explicit, bounded, and observable.
