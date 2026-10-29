@@ -2,6 +2,15 @@
 
 All notable changes to CloudSaveKit are documented here.
 
+## 0.3.1 — 2026-10-29
+
+### Documentation
+
+- Documented a tvOS secondary-profile failure mode in which a correctly entitled app receives the default profile's CloudKit account, with privacy-safe account/store diagnosis and bounded owner-coordinated profile re-addition.
+- Clarified that CloudSaveKit binds CloudKit's verified account and cannot infer a mismatch from the visible system profile; consumer two-account acceptance remains necessary.
+
+This release contains no public API or runtime behavior changes.
+
 ## 0.3.0 — 2026-10-28
 
 ### Added
