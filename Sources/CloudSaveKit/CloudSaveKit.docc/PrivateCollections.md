@@ -98,6 +98,8 @@ For host-owned checkpoint recovery, verify account and canonical manifest first,
 
 The package does not install a second database subscription or notification pipeline. `CKSyncEngine` retains that ownership. The application supplies platform entitlements and signing, including any tvOS current-user capability, and is responsible for real profile-switch acceptance. Credential-free package tests do not establish device account isolation or delivery of system notifications.
 
+On Apple TV, a selected secondary profile can still receive the default account's CloudKit identity on an affected device even when the app is correctly entitled and launches a new process. The coordinator binds the account CloudKit actually verifies. Follow the <doc:Troubleshooting> account-versus-store evidence ladder before changing application bindings or package behavior; verify distinct accounts again after any system-profile repair.
+
 ## Diagnostics and tests
 
 Personal lifecycle events use the existing `com.thatfactory.cloudsavekit` subsystem, `sync` category, and ☁️ prefix. Account, bootstrap, session, engine, and exact-record outcomes use fixed privacy-safe tokens. Account names, record/zone identifiers, manifest values, images, and error payloads never enter messages. Pure tokens and value types remain silent.

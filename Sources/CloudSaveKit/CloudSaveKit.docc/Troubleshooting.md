@@ -30,6 +30,20 @@ If explicit fetch generations complete while the known server record remains abs
 
 A successful fetch API call does not independently prove that a stale or mismatched checkpoint discovered the expected zone. Likewise, a configured-zone dirty flag of `false` is not proof that the server contains no newer records.
 
+## A secondary Apple TV profile opens the default account
+
+Apple's [current-user guidance](https://developer.apple.com/documentation/tvservices/personalizing-your-app-for-each-user-on-apple-tv) says a correctly entitled tvOS app receives the selected user's iCloud data. With the [modern User Management entitlement](https://developer.apple.com/documentation/tvservices/mapping-apple-tv-users-to-app-profiles), the system also separates `UserDefaults`; the user-independent Keychain API is a separate, optional choice. The host app must enable the capability in its signed tvOS build and embedded provisioning profile. CloudSaveKit verifies the account supplied by CloudKit, not the profile name displayed by tvOS Settings. An immutable personal session cannot infer that CloudKit supplied the wrong profile's otherwise valid account.
+
+If a selected secondary profile displays the default person's private collection, establish which boundary crossed before changing code:
+
+1. Confirm two distinct, fully signed-in Apple Accounts in native Apple TV Settings and record the selected profile using private A/B aliases.
+2. Inspect the installed app's effective User Management and iCloud entitlements and provisioning. Launch that exact build from the native app grid under each profile; record fresh process/build identity.
+3. Compare ``CloudSavePrivateCoordinator``'s verified account, the active ``CloudSavePrivateSession`` context, the host's account-qualified store/checkpoint, and a synthetic entry set. Retain only same/different and bounded-count results; do not log or publish account IDs, record IDs, credentials, or content. Repeat A → B → A and cold launches.
+
+If CloudKit verifies B but the host opens A's store, repair the host's account-to-store handoff. If CloudKit verifies A under selected B, preserve the signed-build and process evidence and diagnose tvOS profile state before changing CloudSaveKit or adding manual account mapping. A new PID, `TVUserManager.shouldStorePreferencesForCurrentUser == true`, or a different Settings label does not establish that CloudKit supplied B. A debug-only `UserDefaults` marker written solely under A can test preference isolation separately; remove it after the experiment.
+
+On one observed device, both supported current-user entitlement values and a normal restart still delivered the default account under the secondary profile. With the owner's confirmation that the secondary profile's local data was replaceable, removing and re-adding only that profile restored distinct verified accounts and stores through repeated native switches. This does not identify the internal tvOS cause or guarantee the same repair elsewhere. Try one normal restart first; if it fails, follow [Apple's profile removal and re-addition flow](https://support.apple.com/guide/tv/atvb0753b37d/tvos) only with the owner's action-time confirmation and owner-operated sign-in. Preserve the default and other profiles. Do not uninstall the app, clear trusted bindings/checkpoints, recreate zones, or factory-reset the device as a speculative fix. If the mismatch persists, retain a minimal privacy-safe reproduction for Apple support.
+
 ## Data appears but the manual result says zero
 
 CKSyncEngine may perform a scheduled fetch immediately before the explicit generation. If logs show database discovery, zone delivery, and host apply before manual completion, the final explicit operation can correctly report zero transferred records because the scheduled generation already applied them. Treat operation counts as attribution snapshots and use the ordered timeline.

@@ -42,13 +42,15 @@ Add CloudSaveKit to your package dependencies:
 ```swift
 .package(
     url: "https://github.com/thatfactory/cloudsavekit.git",
-    from: "0.3.0"
+    from: "0.3.1"
 )
 ```
 
 Implement `CloudSaveClient` in the actor that owns your local database. For one personal collection per account, use `CloudSavePrivateCoordinator`: it constructs the container, observes account changes, verifies identity, and conditionally provisions a generic manifest. Its `CloudSavePrivateSession` permanently binds that account and zone to your client. See the [private collection integration guide](https://thatfactory.github.io/cloudsavekit/documentation/cloudsavekit/privatecollections/) for a complete neutral-schema example and the offline trust contract.
 
 Personal sessions revalidate incoming manifest identities and drain admitted host callbacks during retirement. Await retirement before reading a checkpoint for a replacement session over the same store. Configured-zone network errors retain their transport classification so a verified, initialized cache can remain usable offline; a failed fetch never establishes initial-empty readiness.
+
+For Apple TV consumers, a visible profile switch does not by itself prove that CloudKit supplied that profile's account. The [troubleshooting guide](Sources/CloudSaveKit/CloudSaveKit.docc/Troubleshooting.md#a-secondary-apple-tv-profile-opens-the-default-account) gives a privacy-safe account/store comparison and a bounded system-profile recovery path. CloudSaveKit binds the account actually verified by CloudKit; the host must test two real profiles before claiming isolation.
 
 ```swift
 let coordinator = CloudSavePrivateCoordinator(
