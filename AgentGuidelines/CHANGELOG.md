@@ -2,6 +2,56 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.0.47] - 2026-11-06
+
+### Added
+
+- Added independently versioned Codex review policy with full and review-only adoption profiles, exact managed root contracts, a Swift synchronizer, and a pinned shared CI action. Latest-policy checks reject stale or modified content and uncertain provenance.
+- Added regression coverage for synchronization, preservation of local instructions, profile boundaries, duplicate contracts, publication identities, and unavailable policy sources.
+
+### Changed
+
+- Restricted review output to substantiated P0/P1 defects, clarified one automatic opening/ready review with local verification of batched remediation, and retained bounded monitoring and explicit owner authorization for extra review.
+- Made reviewer rules and PR lifecycle available directly in every root instruction file without adopting unrelated guidance. Removed retired delegated-review exceptions and aligned audit, release, and global instruction templates.
+
+## [0.0.46] - 2026-11-05
+
+### Changed
+
+- Made the self-hosted runner's active Xcode/Swift toolchain the CI default, with environment logging and real build/test validation. Exact version or build pins require a documented, evidence-backed repository exception with a revisit condition.
+- Updated the Xcode-upgrade skill to remove unjustified CI pins instead of moving them to the newly validated version.
+- Clarified Swift package badges: omit Updated and Revision/latest-release-version badges unless a documented reader need justifies them; retain Release/publishing workflow-status badges for the package's own workflows.
+
+### Added
+
+- Added completion-audit checks for toolchain constraints in workflows and invoked scripts, documented exceptions, active-toolchain validation, and Swift package badge semantics.
+
+## [0.0.45] - 2026-11-04
+
+### Added
+
+- Added the canonical Networking guide requiring Apple-native networking and typed HTTP through Apple's `swift-http-types` HTTPTypes and HTTPTypesFoundation products with URLSession transport, including native bridges and justified capability-gap exceptions.
+- Added networking audit coverage for actual typed implementation, target linkage, native transport, validation, and explicit adoption deferrals without a false full-compliance claim.
+
+### Changed
+
+- Centralized network transport ownership and validation guidance with links from architecture, package, testing, and security guides.
+- Updated the consumer external-dependency contract to v2 for the narrow standing approval of `swift-http-types`; consumers must synchronize the root contract on adoption. Other external runtime dependencies retain their approval requirements.
+
+## [0.0.44] - 2026-10-30
+
+### Added
+
+- Added the reusable `xcode-upgrade` skill for intentional Xcode, dependency, compiler-settings, and CI upgrades in applications and Swift packages, including requested project-format conversion and evidence-based validation.
+- Documented consumer discovery through a subtree skill symlink and explicit invocation with a target Xcode and additional instructions.
+
+## [0.0.43] - 2026-10-29
+
+### Added
+
+- Documented a bounded physical Apple TV diagnostic for current-user CloudKit and local-store identity, including the observed secondary-profile account crossover, privacy-safe comparisons, profile re-addition, and limits on attributing a tvOS cause.
+- Added audit coverage for real two-account evidence when a consumer changes tvOS per-user storage or CloudKit account binding; unrelated changes and documentation-only work remain outside that gate.
+
 ## [0.0.42] - 2026-10-20
 
 ### Changed
@@ -184,7 +234,7 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
-- Clarified that the bounded review-round policy applies to Codex GitHub reviews, while otherwise-authorized ChatGPT and Reasoning Relay delegations use their own workflow limits.
+- Clarified that the bounded review-round policy applies to Codex GitHub reviews, while other explicitly selected advisory workflows used their own limits.
 - Namespaced Codex review tracking fields and advanced the consumer code-review contract to v2.
 
 ## [0.0.20] - 2026-08-21
