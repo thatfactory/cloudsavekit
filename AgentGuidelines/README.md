@@ -63,6 +63,7 @@ The subtree does not automatically import every guide into an agent's context. A
 - [Agent workflow and tool execution](Guidelines/AgentWorkflow.md)
 - [App Store metadata](Guidelines/AppStore.md)
 - [CI/CD](Guidelines/CICD.md)
+- [Codex review policy](ReviewPolicy/README.md)
 - [Development and reusability](Guidelines/Development.md)
 - [Device Hub, physical devices, and simulators](Guidelines/Xcode/DeviceInteraction.md)
 - [Documentation](Guidelines/Documentation.md)
@@ -71,6 +72,7 @@ The subtree does not automatically import every guide into an agent's context. A
 - [GitHub pull requests](Guidelines/GitHub/PullRequests.md)
 - [Localization](Guidelines/Localization.md)
 - [Logging](Guidelines/Logging.md)
+- [Networking](Guidelines/Networking.md)
 - [Redux architecture and physical folder organization](Guidelines/Architecture/Redux.md)
 - [Swift](Guidelines/Swift/Swift.md)
 - [Swift format](Guidelines/Swift/SwiftFormat.md)
@@ -92,7 +94,7 @@ From the consumer repository root, install a tagged release:
 git subtree add \
   --prefix=AgentGuidelines \
   https://github.com/thatfactory/agent-guidelines.git \
-  0.0.42 \
+  0.0.48 \
   --squash
 ```
 
@@ -110,13 +112,19 @@ Keep the subtree tracked, but add this to the consumer's tracked `.gitattributes
 AgentGuidelines/** linguist-generated
 ```
 
-Copy and adapt [the consumer template](Templates/AGENTS.md). Keep the consumer file small: describe the product or package, map its concrete physical folders, point to the applicable shared guides, and state only genuine exceptions. Keep the version-marked code-review contract, documentation-maintenance contract, external-dependency contract, and runtime-observability contract directly in the repository-root `AGENTS.md`; Markdown links to shared guides are navigation, not automatic instruction includes.
+Copy and adapt [the consumer template](Templates/AGENTS.md). Keep the consumer file small: describe the product or package, map its concrete physical folders, point to the applicable shared guides, and state only genuine exceptions. Keep the version-marked code-review contract, PR-lifecycle contract, documentation-maintenance contract, external-dependency contract, and runtime-observability contract directly in the repository-root `AGENTS.md`; Markdown links to shared guides are navigation, not automatic instruction includes.
 
 Copy the shared [`.gitignore` template](Templates/.gitignore) into a new Xcode project or Swift package. Keep authored project files, workspaces, and package lockfiles eligible for version control, and follow the [Git ignore guidance](Guidelines/Git/IgnoreFiles.md) when an established consumer needs an additional project-specific rule.
+
+### Adopt review instructions only
+
+For a repository that needs only Codex reviewer rules and the PR flow, use the [review-only profile](ReviewPolicy/README.md). It installs managed root instructions and CI validation without the shared subtree or unrelated engineering contracts. Both profiles require the latest independently published review-policy revision. Use the central synchronizer rather than hand-copying policy text.
 
 ### Configure global Codex instructions
 
 Copy the contents of [`Templates/GlobalCodexInstructions.md`](Templates/GlobalCodexInstructions.md) into the user's global Codex instructions.
+
+Copy only its code-review section into Settings → Code Review → Review Instructions for manually started reviews. Automatic GitHub reviews use the checked-in root contracts.
 
 These instructions bootstrap discovery of repository-local `AGENTS.md` files and shared guides and provide generic high-signal code-review defaults. Repository engineering policy and specialized threat models remain versioned in this repository or the consumer rather than duplicated in each user's global configuration.
 
@@ -138,7 +146,7 @@ Validate the checked-in consumer integration directly or through the completion-
 AgentGuidelines/Scripts/validate_consumer_setup.swift
 ```
 
-The native Swift validator checks the version-marked root Code Review, Documentation Maintenance, External Dependency, and Runtime Observability contracts, Codex subtree-review scope, `.gitattributes`, local guide links, and the audit-skill symlink. When the root `AGENTS.md` links the shared Swift-format guide, it also requires both configuration symlinks and a non-mutating `lint-strict` CI invocation. Pass `--require-swift-format` only when auditing formatter adoption before adding that guide link.
+The native Swift validator checks the version-marked root Code Review, PR Lifecycle, Documentation Maintenance, External Dependency, and Runtime Observability contracts, Codex subtree-review scope, `.gitattributes`, local guide links, and the audit-skill symlink. When the root `AGENTS.md` links the shared Swift-format guide, it also requires both configuration symlinks and a non-mutating `lint-strict` CI invocation. Pass `--require-swift-format` only when auditing formatter adoption before adding that guide link.
 
 ## Update a consumer
 
@@ -148,11 +156,27 @@ Review the target release's changelog, then pull it deliberately:
 git subtree pull \
   --prefix=AgentGuidelines \
   https://github.com/thatfactory/agent-guidelines.git \
-  0.0.42 \
+  0.0.48 \
   --squash
 ```
 
-Confirm `AgentGuidelines/VERSION`, review the subtree diff, synchronize the marked code-review contract, documentation-maintenance contract, external-dependency contract, and runtime-observability contract when their versions change, run `AgentGuidelines/Scripts/validate_consumer_setup.swift`, and run the consumer's relevant tests. Keep the subtree update in its own commit, and identify the old and new versions plus the central release or pull request in the consumer pull-request description. Updates are intentionally not automatic: one guideline release cannot silently change every project.
+Confirm `AgentGuidelines/VERSION`, review the subtree diff, synchronize the marked code-review contract, PR-lifecycle contract, documentation-maintenance contract, external-dependency contract, and runtime-observability contract when their versions change, run `AgentGuidelines/Scripts/validate_consumer_setup.swift`, and run the consumer's relevant tests. Keep the subtree update in its own commit, and identify the old and new versions plus the central release or pull request in the consumer pull-request description. Updates are intentionally not automatic: one guideline release cannot silently change every project.
+
+When first adopting [Networking](Guidelines/Networking.md), synchronize external-dependency contract v2 and perform the [networking adoption audit](.agents/skills/agent-guidelines-audit/SKILL.md#audit-networking), including existing paths and any explicitly approved migration deferrals.
+
+## Upgrade a consumer's Xcode
+
+Use the [`xcode-upgrade` skill](.agents/skills/xcode-upgrade/SKILL.md) to move an Apple-platform application or Swift package to a requested Xcode, update dependencies and compiler settings, align CI, and validate the result. In Codex, invoke `$xcode-upgrade to Xcode 27.2 and use the new JSON format` or select the skill. The skill also recognizes `/xcode-upgrade ...` as request text when the client passes it through; it does not register a client slash command. The skill follows the shared [project-settings guide](Guidelines/Xcode/ProjectSettings.md) and [package compiler-settings baseline](Guidelines/Packages.md#compiler-settings-baseline), preserving consumer-specific exceptions and the user's authorization boundaries.
+
+The skill is discoverable in this central checkout. To use it in a consumer that has adopted this release, expose it from the subtree:
+
+```sh
+mkdir -p .agents/skills
+ln -s ../../AgentGuidelines/.agents/skills/xcode-upgrade \
+  .agents/skills/xcode-upgrade
+```
+
+Alternatively, explicitly provide `AgentGuidelines/.agents/skills/xcode-upgrade/SKILL.md` with the request. Keep the skill beside its linked guides in the subtree; copying only `SKILL.md` loses those references. Subtree adoption and skill exposure do not upgrade a consumer's toolchain until requested.
 
 ## Maintain the source of truth
 

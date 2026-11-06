@@ -656,7 +656,8 @@ func validateExternalDependencyPolicy(_ errors: inout [String]) {
     if let contents = readText(packagesGuideline, errors: &errors) {
         let required = [
             "[external dependency policy](Development.md#external-dependencies)": "package dependency policy pointer",
-            "must not introduce or conceal a third-party runtime dependency": "first-party package boundary",
+            "must not introduce or conceal a third-party runtime dependency outside an explicitly approved role":
+                "first-party package boundary and approved roles",
             "guideline-mandated tooling dependency": "DocC tooling exception",
             "root `LICENSE` file": "root license-file retention",
             "Retain the README license badge": "README license-badge retention",
@@ -668,9 +669,54 @@ func validateExternalDependencyPolicy(_ errors: inout [String]) {
         }
     }
     if let contents = readText(agentsTemplate, errors: &errors),
-        !contents.contains("BEGIN THATFACTORY EXTERNAL DEPENDENCY CONTRACT v1")
+        !contents.contains("BEGIN THATFACTORY EXTERNAL DEPENDENCY CONTRACT v2")
     {
         errors.append("Templates/AGENTS.md: missing external-dependency contract")
+    }
+}
+
+/// Protects the canonical networking policy and its completion-audit integration.
+func validateNetworkingPolicy(_ errors: inout [String]) {
+    let requirements: [(String, [String])] = [
+        (
+            "Guidelines/Networking.md",
+            [
+                "## Apple networking APIs", "`URLSession`", "`swift-http-types`",
+                "`HTTPTypes` and `HTTPTypesFoundation`", "`HTTPRequest`", "`HTTPResponse`",
+                "`HTTPRequest.Method`", "`HTTPFields` and `HTTPField.Name`", "`HTTPResponse.Status`",
+                "## Capability-gap exceptions", "explicit repository-owner approval",
+                "### Standing dependency approval", "does not extend to other Apple open-source packages",
+                "handle failed conversions", "## Adoption and audit", "owner-approved, scoped migration deferral",
+                "https://github.com/apple/swift-http-types/tree/1.8.0",
+            ]
+        ),
+        (
+            ".agents/skills/agent-guidelines-audit/SKILL.md",
+            [
+                "[networking check](#audit-networking)", "## Audit networking", "Guidelines/Networking.md",
+                "Dependency presence or imports alone do not establish compliance",
+                "report it as deferred compliance, never full networking compliance",
+                "A deferral does not authorize new noncompliant networking",
+                "missing applicable validation prevents audit completion",
+            ]
+        ),
+        (
+            "Guidelines/Development.md",
+            ["Networking.md#standing-dependency-approval", "Unless these guidelines explicitly pre-approve"]
+        ),
+        (
+            "Templates/AGENTS.md",
+            [
+                "AgentGuidelines/Guidelines/Networking.md", "narrow standing approval",
+                "does not approve other Apple open-source packages",
+            ]
+        ),
+    ]
+    for (path, fragments) in requirements {
+        guard let contents = readText(root.appendingPathComponent(path), errors: &errors) else { continue }
+        for fragment in fragments where !contents.contains(fragment) {
+            errors.append("\(path): missing networking requirement: '\(fragment)'")
+        }
     }
 }
 
@@ -918,7 +964,7 @@ func validateAuditSkill(_ errors: inout [String]) {
         let requiredTemplateValues = [
             "AgentGuidelines/Guidelines/Development.md": "Development.md pointer",
             "BEGIN THATFACTORY DOCUMENTATION MAINTENANCE CONTRACT v1": "documentation-maintenance contract",
-            "BEGIN THATFACTORY EXTERNAL DEPENDENCY CONTRACT v1": "external-dependency contract",
+            "BEGIN THATFACTORY EXTERNAL DEPENDENCY CONTRACT v2": "external-dependency contract",
             "BEGIN THATFACTORY RUNTIME OBSERVABILITY CONTRACT v1": "runtime-observability contract",
             "AgentGuidelines/Guidelines/Documentation.md": "Documentation.md pointer",
             "## Stack": "Stack section",
@@ -929,24 +975,27 @@ func validateAuditSkill(_ errors: inout [String]) {
     }
 }
 
-/// Validates positive evidence and bounded monitoring for automatic Codex reviews.
+/// Validates positive evidence, bounded monitoring, and remediation-only closure.
 func validateCodexReviewEvidence(_ errors: inout [String]) {
     guard let guide = readText(pullRequestsGuideline, errors: &errors) else { return }
     let required = [
         "codex_review_configuration = enabled | disabled | unknown",
         "codex_review_execution = not_started | scheduled | processing | completed",
-        "codex_review_expected_sha = <current PR head SHA>",
+        "codex_review_expected_sha = <head of the active review round>",
         "Only positive repository-specific evidence",
         "unknown` plus no signal remains `not_started`",
         "Discovering `enabled` alone does not schedule a review",
-        "reviewed SHA equals the expected SHA",
-        "at most five minutes total from entry into `scheduled`, including time spent in `processing`",
+        "including time spent in `processing`",
         "A processing signal changes the execution state but does not reset the deadline or poll budget",
         "An identical fingerprint causes no substantive re-analysis or user notification",
         "Without configuration evidence, do not create a monitor",
         "do not transfer `scheduled`, `processing`, or `completed`",
         "At the deadline, stop and terminate the monitor, report the observed facts once, and never infer approval",
         "If the head changes during monitoring, terminate the old monitor",
+        "codex_remediation_verified_sha",
+        "never relabel the newer head as bot-reviewed",
+        "the exact request-comment reactions",
+        "rerun the latest review-policy check",
     ]
     for concept in required where !guide.contains(concept) {
         errors.append("Guidelines/GitHub/PullRequests.md: missing Codex review evidence rule: \(concept)")
@@ -955,17 +1004,15 @@ func validateCodexReviewEvidence(_ errors: inout [String]) {
     where guide.contains(forbidden) {
         errors.append("Guidelines/GitHub/PullRequests.md: unconditional Codex review gate: \(forbidden)")
     }
-    let scenarioOutcomes = [
-        "Enabled with a current-head processing signal | `processing` | Pending | No; processing already began",
-        "Enabled with a completed review covering the expected head and dispositioned findings | `completed` | Satisfied | No",
+    let outcomes = [
+        "Enabled with a current-head processing signal | `processing` | Pending",
+        "Enabled with a completed review covering the expected head and dispositioned findings | `completed` | Satisfied",
         "Unknown with no signal or configuration evidence | `not_started` | Not blocked by absent Codex review | No",
         "Disabled with no review | `not_started` | Not blocked by absent Codex review | No",
-        "Review completed for an old head | Re-establish for new head | Old review does not satisfy the gate | No inherited monitor",
-        "Enabled and positively eligible, with no start signal | `scheduled` | Pending while required | Yes, at most five minutes",
-        "A signal inside the budget advances to `processing` while preserving configuration evidence and expected SHA",
-        "If no signal appears by the deadline, terminate monitoring and report the unresolved verified state once; timeout never satisfies the gate",
+        "Review completed for an old head | Re-establish for new head",
+        "Completed initial review plus a locally verified remediation-only delta | `completed` | Satisfied",
     ]
-    for outcome in scenarioOutcomes where !guide.contains(outcome) {
+    for outcome in outcomes where !guide.contains(outcome) {
         errors.append("Guidelines/GitHub/PullRequests.md: missing Codex review scenario outcome: \(outcome)")
     }
     if let template = readText(agentsTemplate, errors: &errors),
@@ -973,6 +1020,54 @@ func validateCodexReviewEvidence(_ errors: inout [String]) {
     {
         errors.append("Templates/AGENTS.md: missing unknown-configuration safeguard")
     }
+}
+
+/// Ensures every owned policy mirror has one exact canonical contract and no old versions.
+func validateReviewPolicyMirrors(_ errors: inout [String]) {
+    let canonicalURL = root.appendingPathComponent("ReviewPolicy/Policy.md")
+    guard let canonical = readText(canonicalURL, errors: &errors),
+        let revisionText = readText(root.appendingPathComponent("ReviewPolicy/VERSION"), errors: &errors),
+        let revision = Int(revisionText.trimmingCharacters(in: .whitespacesAndNewlines)), revision > 0
+    else {
+        errors.append("ReviewPolicy/VERSION: expected a positive policy revision")
+        return
+    }
+    let mirrors = ["AGENTS.md", "Templates/AGENTS.md", "Templates/GlobalCodexInstructions.md"]
+    for family in ["CODE REVIEW", "PR LIFECYCLE"] {
+        let escaped = NSRegularExpression.escapedPattern(for: family)
+        let pattern =
+            "<!-- BEGIN THATFACTORY \(escaped) CONTRACT v[0-9]+ -->[\\s\\S]*?<!-- END THATFACTORY \(escaped) CONTRACT v[0-9]+ -->"
+        let source = matches(pattern, in: canonical)
+        guard source.count == 1, let expected = capture(0, from: source[0], in: canonical) else {
+            errors.append("ReviewPolicy/Policy.md: expected one canonical \(family) contract")
+            continue
+        }
+        for relative in mirrors where family == "CODE REVIEW" || relative != "Templates/GlobalCodexInstructions.md" {
+            guard let value = readText(root.appendingPathComponent(relative), errors: &errors) else { continue }
+            let found = matches(pattern, in: value)
+            if found.count != 1 || capture(0, from: found[0], in: value) != expected
+                || value.components(separatedBy: "<!-- BEGIN THATFACTORY \(family) CONTRACT").count - 1 != 1
+            {
+                errors.append(
+                    "\(relative): obsolete, duplicate, or mismatched canonical \(family.lowercased()) contract")
+            }
+        }
+    }
+    for (file, profile) in [("AGENTS.md", "central"), ("Templates/AGENTS.md", "template")] {
+        guard let value = readText(root.appendingPathComponent(file), errors: &errors) else { continue }
+        let expected = "<!-- THATFACTORY CODEX REVIEW POLICY profile=\(profile) revision=\(revision) source=local -->"
+        if !value.contains(expected)
+            || value.components(separatedBy: "<!-- THATFACTORY CODEX REVIEW POLICY ").count - 1 != 1
+        {
+            errors.append("\(file): missing owned review-policy provenance")
+        }
+    }
+    validateExecutable(
+        root.appendingPathComponent("Scripts/sync_codex_review_policy.swift"),
+        description: "review-policy synchronizer", errors: &errors)
+    validateExecutable(
+        root.appendingPathComponent("Tests/run_review_policy_tests.swift"), description: "review-policy tests",
+        errors: &errors)
 }
 
 /// Validates the reusable ignore template and its shared reconciliation policy.
@@ -1025,9 +1120,11 @@ func main() -> Int32 {
     validateXcodeProjectSettingsGuideline(&errors)
     validatePackageCompilerSettingsGuideline(&errors)
     validateExternalDependencyPolicy(&errors)
+    validateNetworkingPolicy(&errors)
     validateNativeComponentPolicy(&errors)
     validateInteractionRenderingPolicy(&errors)
     validateCodexReviewEvidence(&errors)
+    validateReviewPolicyMirrors(&errors)
     validateGitignoreGuidance(&errors)
     validateExecutable(consumerSetupScript, description: "consumer setup validator", errors: &errors)
     validateAuditSkill(&errors)
