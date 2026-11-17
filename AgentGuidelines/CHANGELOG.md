@@ -2,6 +2,33 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.0.51] - 2026-11-12
+
+### Added
+
+- Added focused Design guides for user experience and animations, defining task continuity, justified automatic work and loading, discarded opportunistic refreshes, coordinated movement, concealment, graceful reversal, and stable neighbouring controls.
+- Added framework-independent completion-audit coverage with observable acceptance scenarios, scoped runtime evidence, documentation-only walkthroughs, and concrete stopping rules for these experience requirements.
+
+### Changed
+
+- Linked the Design guides from SwiftUI, the consumer template, and the guideline catalog, retaining implementation and Reduce Motion policy in the SwiftUI guide.
+
+## [0.0.50] - 2026-11-10
+
+### Changed
+
+- Required SwiftUI implementations for SwiftUI application UI, permitting UIKit/AppKit controllers, representables, hosting, or other bridges only for a demonstrated missing SwiftUI capability with prior owner approval and a durable, narrowly scoped exception.
+- Added a mandatory completion-audit gate that traces interoperability through wrappers and dependencies, verifies SwiftUI alternatives and exception evidence, and rejects convenience or transition-style fallbacks that SwiftUI can implement.
+- Added validator and mutation-test coverage protecting the SwiftUI-first policy and audit gate from removal or drift.
+
+## [0.0.49] - 2026-11-09
+
+### Changed
+
+- Expanded task-based discovery of current Xcode skills for SwiftUI, resizability, App Intents, document-based applications, test modernization, and profiling while retaining deployment-aware, scoped adoption.
+- Clarified SwiftUI observation dependencies, inexpensive stable collection identifiers, and constant row structure in lazy containers without introducing parallel Redux state ownership.
+- Clarified Swift Testing's per-test suite lifecycle, cleanup requirements, and confirmation event timing.
+
 ## [0.0.48] - 2026-11-06
 
 ### Changed
