@@ -16,6 +16,12 @@ A post-request automatic generation may satisfy the barrier; a pre-request gener
 
 Explicit operations are serialized per engine. Repeated taps do not create overlapping explicit engine work.
 
+## Recovering an unconfirmed fetch
+
+Set `recoverUnconfirmedFetch: true` when creating a private session to recover an explicit fetch that reports success while automatic scheduling is enabled and the configured zone lacks a completed fetch or database discovery that reported no changes to that zone.
+
+The session closes admission for new send batches and waits for issued sends and ordered host callbacks to finish. It attaches an SDK engine with automatic scheduling disabled using the latest successfully persisted checkpoint. After the explicit fetch, the session restores automatic scheduling from the same binding and the latest durable ledger. A combined `syncNow()` sends after the automatic engine is restored. Cancellation still restores scheduling while the session remains authorized. Account or manifest invalidation remains terminal.
+
 ## Send reconciliation
 
 ``CloudSaveEngine/sendNow()`` reloads the host's durable pending ledger before sending. It materializes current records through ``CloudSaveClient/record(for:)`` and revalidates asynchronous results against the current engine lifecycle.

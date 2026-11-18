@@ -72,6 +72,8 @@ try await session.fetchNow()
 // Now a newly initialized local projection may truthfully be reported as empty.
 ```
 
+When a runtime's automatic engine can report an unconfirmed explicit fetch, opt into recovery by adding `recoverUnconfirmedFetch: true` to `makeSession`. The session retains automatic scheduling between requests. See <doc:ExplicitSynchronization> for checkpoint and send ordering.
+
 `start()` restores the durable ledger; it is not a remote fetch barrier. `fetchNow()` preserves the existing engine's freshness and host-apply guarantees. A failed initial fetch cannot establish that the remote collection is empty or synchronized. Independently authorized local data may remain ready while that remote state is unknown. When local pending work needs reconciliation with an existing remote collection, create the session with `automaticallySync: false`, start it, fetch and durably apply remote state, validate the host's reconciliation barrier, and only then send. The host's local readiness and ownership claims do not substitute for this barrier.
 
 The supplied client must permanently reference the original local store. Personal sessions never invoke the client's mutable-account rebinding callback. A matching sign-in may restore its ledger; a sign-out, switch, or mismatched sign-in invalidates the session first. Known-zone deletion and `zoneNotFound` are integrity failures: no automatic zone save, local zone-deletion callback, or speculative manifest replacement is permitted. The local mutation ledger must never contain the bootstrap manifest itself.

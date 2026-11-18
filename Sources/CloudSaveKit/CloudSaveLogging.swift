@@ -5,6 +5,13 @@ enum CloudSaveLogging {
     static let emoji = "☁️"
     static let subsystem = "com.thatfactory.cloudsavekit"
 
+    enum FetchRecoveryEvent: String {
+        case manualEngineAttached = "manual engine attached"
+        case automaticEngineRestored = "automatic engine restored"
+        case restorationFailed = "engine restoration failed"
+        case cancelled
+    }
+
     static func log(
         level: AppLogLevel = .debug,
         _ message: String
@@ -36,6 +43,14 @@ enum CloudSaveLogging {
     /// Describes one terminal explicit request outcome.
     static func fetchRequestSucceeded(request: Int) -> String {
         "fetch request | request=\(request), result=success"
+    }
+
+    static func fetchRequestUnconfirmed(request: Int) -> String {
+        "fetch request | request=\(request), result=unconfirmed"
+    }
+
+    static func explicitFetchRecovery(_ event: FetchRecoveryEvent) -> String {
+        "explicit fetch recovery | \(event.rawValue)"
     }
 
     /// Describes a CKSyncEngine fetch-generation transition.

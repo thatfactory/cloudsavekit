@@ -15,7 +15,7 @@ public final actor CloudSavePrivateSession {
     init(
         context: CloudSavePrivateSessionContext,
         database: CKDatabase, stateSerialization: CKSyncEngine.State.Serialization?,
-        client: any CloudSaveClient, automaticallySync: Bool,
+        client: any CloudSaveClient, automaticallySync: Bool, recoverUnconfirmedFetch: Bool = false,
         transport: any CloudSavePrivateTransport, requests: CloudSavePrivateRequestGate
     ) {
         var configuration = CloudSaveConfiguration(
@@ -23,6 +23,7 @@ public final actor CloudSavePrivateSession {
             zone: CKRecordZone(zoneID: context.zoneID), automaticallySync: automaticallySync
         )
         configuration.privateSession = context
+        configuration.recoverUnconfirmedFetch = recoverUnconfirmedFetch
         let engine = CloudSaveEngine(
             configuration: configuration, client: CloudSavePrivateClient(client: client, context: context)
         )

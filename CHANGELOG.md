@@ -2,6 +2,12 @@
 
 All notable changes to CloudSaveKit are documented here.
 
+## 0.3.2 — 2026-11-18
+
+### Fixed
+
+- Private sessions can opt into recovery for an explicit SDK fetch that reports success without server discovery while automatic scheduling is enabled. Recovery drains issued sends, fetches using the same binding and checkpoint in manual mode, and restores automatic scheduling with the durable ledger.
+
 ## 0.3.1 — 2026-10-29
 
 ### Documentation
