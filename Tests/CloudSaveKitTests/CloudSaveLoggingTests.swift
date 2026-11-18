@@ -35,6 +35,26 @@ struct CloudSaveLoggingTests {
         )
     }
 
+    @Test func formatsFetchRecoveryWithoutBindingOrRecordMetadata() {
+        #expect(
+            CloudSaveLogging.formatted(CloudSaveLogging.fetchRequestUnconfirmed(request: 12))
+                == "☁️ fetch request | request=12, result=unconfirmed"
+        )
+        #expect(
+            CloudSaveLogging.explicitFetchRecovery(.manualEngineAttached)
+                == "explicit fetch recovery | manual engine attached"
+        )
+        #expect(
+            CloudSaveLogging.explicitFetchRecovery(.automaticEngineRestored)
+                == "explicit fetch recovery | automatic engine restored"
+        )
+        #expect(
+            CloudSaveLogging.explicitFetchRecovery(.restorationFailed)
+                == "explicit fetch recovery | engine restoration failed"
+        )
+        #expect(CloudSaveLogging.explicitFetchRecovery(.cancelled) == "explicit fetch recovery | cancelled")
+    }
+
     @Test func formatsFetchDiagnosticsWithoutCloudKitIdentities() {
         #expect(
             CloudSaveLogging.fetchState(phase: "before", configuredZoneDirty: true)

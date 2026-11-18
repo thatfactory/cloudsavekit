@@ -4,6 +4,60 @@ import Testing
 
 @Suite("Cloud save fetch coordinator")
 struct CloudSaveFetchCoordinatorTests {
+    @Test func newerCompletionWithoutServerEvidenceIsUnconfirmed() async throws {
+        let coordinator = CloudSaveFetchCoordinator()
+        _ = await coordinator.beginFetch()
+        await coordinator.confirmConfiguredZoneFetch()
+        _ = await coordinator.completeFetch()
+        let request = try await coordinator.prepareRequest()
+
+        _ = await coordinator.beginFetch()
+        _ = await coordinator.completeFetch()
+
+        #expect(try await coordinator.validate(request) == false)
+    }
+
+    @Test func postRequestServerEvidenceConfirmsSuccessfulFetch() async throws {
+        let coordinator = CloudSaveFetchCoordinator()
+        let request = try await coordinator.prepareRequest()
+
+        _ = await coordinator.beginFetch()
+        await coordinator.observeDatabaseDiscovery(configuredZoneChanged: false)
+        _ = await coordinator.completeFetch()
+
+        #expect(try await coordinator.validate(request))
+    }
+
+    @Test func failedFetchEvidenceCannotConfirmAnotherGeneration() async throws {
+        let coordinator = CloudSaveFetchCoordinator()
+        let request = try await coordinator.prepareRequest()
+
+        _ = await coordinator.beginFetch()
+        await coordinator.confirmConfiguredZoneFetch()
+        await coordinator.failConfiguredZoneFetch()
+        _ = await coordinator.completeFetch()
+        _ = await coordinator.beginFetch()
+        _ = await coordinator.completeFetch()
+
+        #expect(try await coordinator.validate(request) == false)
+    }
+
+    @Test func discoveryOfChangedZoneRequiresItsOwnFetchCompletion() async throws {
+        let coordinator = CloudSaveFetchCoordinator()
+        let first = try await coordinator.prepareRequest()
+        _ = await coordinator.beginFetch()
+        await coordinator.observeDatabaseDiscovery(configuredZoneChanged: true)
+        _ = await coordinator.completeFetch()
+        #expect(try await coordinator.validate(first) == false)
+
+        let second = try await coordinator.prepareRequest()
+        _ = await coordinator.beginFetch()
+        await coordinator.observeDatabaseDiscovery(configuredZoneChanged: true)
+        await coordinator.confirmConfiguredZoneFetch()
+        _ = await coordinator.completeFetch()
+        #expect(try await coordinator.validate(second))
+    }
+
     @Test func requestWaitsForPriorFetchAndRequiresLaterGeneration() async throws {
         // Given
         let coordinator = CloudSaveFetchCoordinator()

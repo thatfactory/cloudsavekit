@@ -8,11 +8,25 @@ struct CloudSavePendingChangesSnapshot: Sendable {
     /// The authoritative host-ledger generation in which the read completed.
     let ledgerGeneration: Int
 
+    /// The newest mutation covered by the completed snapshot.
+    let mutationGeneration: Int
+
     /// The authoritative pending changes returned by the host.
     let durableChanges: [CloudSavePendingChange]
 
     /// Ledger mutations committed after the host-ledger read began, in their original order.
     let subsequentMutations: [CloudSaveLedgerMutation]
+
+    init(
+        lifecycleGeneration: Int, ledgerGeneration: Int, mutationGeneration: Int = 0,
+        durableChanges: [CloudSavePendingChange], subsequentMutations: [CloudSaveLedgerMutation]
+    ) {
+        self.lifecycleGeneration = lifecycleGeneration
+        self.ledgerGeneration = ledgerGeneration
+        self.mutationGeneration = mutationGeneration
+        self.durableChanges = durableChanges
+        self.subsequentMutations = subsequentMutations
+    }
 }
 
 // MARK: - Effective Changes

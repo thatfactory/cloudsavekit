@@ -4,6 +4,11 @@ import Foundation
 
 /// Synchronizes an application's durable local records with a private or shared CloudKit database.
 public final actor CloudSaveEngine {
+    private typealias EngineSession = (syncEngine: CKSyncEngine, lifecycleGeneration: Int)
+    private enum FetchModeSwitchError: Error {
+        case ledgerReadFailed(any Error)
+    }
+
     /// A stream that retains the latest unconsumed privacy-safe synchronization status.
     public nonisolated let statusUpdates: AsyncStream<CloudSaveStatus>
 
@@ -26,6 +31,8 @@ public final actor CloudSaveEngine {
     private var requiresReconfiguration = false
     private var stateMachine = CloudSaveStateMachine()
     private var storedSyncEngine: CKSyncEngine?
+    private var sendDrain = CloudSaveSendDrain()
+    private var cancellationGeneration = 0
 
     /// Creates an engine without starting synchronization.
     public init(
@@ -157,6 +164,16 @@ public final actor CloudSaveEngine {
 
     /// Performs a serialized explicit fetch without recursively acquiring the operation gate.
     private func performFetchNow() async throws {
+        let cancellation = cancellationGeneration
+        let recover = configuration.automaticallySync && configuration.recoverUnconfirmedFetch
+        let confirmed = try await fetchFromAttachedEngine(checkingDiscovery: recover)
+        guard recover, !confirmed else { return }
+        try await recoverUnconfirmedFetch(cancellation: cancellation)
+    }
+
+    /// Runs one native fetch and reports whether its qualifying generation observed server discovery.
+    @discardableResult
+    private func fetchFromAttachedEngine(checkingDiscovery: Bool = false) async throws -> Bool {
         try await waitForPendingLifecycleTransition()
 
         let session = try operationalSyncEngine()
@@ -182,7 +199,8 @@ public final actor CloudSaveEngine {
                 scope: .zoneIDs([configuration.zoneID])
             )
             try await session.syncEngine.fetchChanges(options)
-            try await fetchCoordinator.validate(request, preservingTransportError: configuration.privateSession != nil)
+            let confirmed = try await fetchCoordinator.validate(
+                request, preservingTransportError: configuration.privateSession != nil)
             try validate(session)
             CloudSaveLogging.log(
                 CloudSaveLogging.fetchState(
@@ -191,9 +209,12 @@ public final actor CloudSaveEngine {
                         .contains(configuration.zoneID)
                 )
             )
-            CloudSaveLogging.log(
-                CloudSaveLogging.fetchRequestSucceeded(request: request.requestGeneration)
-            )
+            if checkingDiscovery, !confirmed {
+                CloudSaveLogging.log(CloudSaveLogging.fetchRequestUnconfirmed(request: request.requestGeneration))
+            } else {
+                CloudSaveLogging.log(CloudSaveLogging.fetchRequestSucceeded(request: request.requestGeneration))
+            }
+            return confirmed
         } catch is CancellationError {
             try throwRecoveryErrorIfNeeded(for: session)
             throw CancellationError()
@@ -292,6 +313,8 @@ public final actor CloudSaveEngine {
 
     /// Cancels in-flight CKSyncEngine operations without starting or rebuilding an engine.
     public func cancel() async {
+        cancellationGeneration &+= 1
+        sendDrain.cancelWait()
         await fetchCoordinator.invalidate()
         guard let storedSyncEngine else {
             return
@@ -310,12 +333,156 @@ public final actor CloudSaveEngine {
     func retire() async {
         configuration.privateSession?.sessionGate.close()
         lifecycleGeneration &+= 1
+        sendDrain.invalidate()
         let retiredEngine = storedSyncEngine
         storedSyncEngine = nil
         await fetchCoordinator.invalidate()
         await retiredEngine?.cancelOperations()
         stateMachine.resetActiveOperations()
         publishStatus(syncEngine: nil)
+    }
+}
+
+// MARK: - Explicit Fetch Recovery
+
+extension CloudSaveEngine {
+    /// Switches the attached SDK instance only after the retiring writer is quiescent.
+    private func recoverUnconfirmedFetch(cancellation: Int) async throws {
+        let automatic = try operationalSyncEngine()
+        let manual = try await switchFetchMode(
+            from: automatic, automaticallySync: false, unlessCancelled: cancellation)
+        CloudSaveLogging.log(CloudSaveLogging.explicitFetchRecovery(.manualEngineAttached))
+
+        let outcome: Result<Void, any Error>
+        do {
+            try checkFetchCancellation(cancellation)
+            try await fetchFromAttachedEngine()
+            outcome = .success(())
+        } catch {
+            outcome = .failure(error)
+        }
+
+        // Caller cancellation cannot leave the session in manual mode. An invalidated session
+        // is still terminal and cannot be reattached by cleanup.
+        let restored = await Task { [self] in
+            do {
+                _ = try await switchFetchMode(from: manual, automaticallySync: true)
+                CloudSaveLogging.log(CloudSaveLogging.explicitFetchRecovery(.automaticEngineRestored))
+            } catch {
+                CloudSaveLogging.log(level: .error, CloudSaveLogging.explicitFetchRecovery(.restorationFailed))
+                throw error
+            }
+        }.result
+        try restored.get()
+        do {
+            try outcome.get()
+            try checkFetchCancellation(cancellation)
+        } catch {
+            if CloudSaveRetryPolicy.isCancellation(error) {
+                CloudSaveLogging.log(CloudSaveLogging.explicitFetchRecovery(.cancelled))
+            }
+            throw error
+        }
+    }
+
+    private func switchFetchMode(
+        from previous: EngineSession, automaticallySync: Bool, unlessCancelled cancellation: Int? = nil
+    ) async throws -> EngineSession {
+        try validate(previous)
+        sendDrain.closeAdmission()
+        defer { sendDrain.openAdmission() }
+
+        while true {
+            try await waitForOutstandingSends()
+            let replacement: EngineSession?
+            do {
+                replacement = try await eventHandlingLock.withLock { [self] in
+                    try await installFetchModeIfIdle(
+                        replacing: previous, automaticallySync: automaticallySync, unlessCancelled: cancellation)
+                }
+            } catch FetchModeSwitchError.ledgerReadFailed(let error) {
+                try validate(previous)
+                await handleHostFailure(error, syncEngine: previous.syncEngine)
+                throw error
+            }
+            if let replacement {
+                await previous.syncEngine.cancelOperations()
+                return replacement
+            }
+        }
+    }
+
+    /// Keeps the retiring identity attached until admitted persistence callbacks complete.
+    private func installFetchModeIfIdle(
+        replacing previous: EngineSession, automaticallySync: Bool, unlessCancelled cancellation: Int?
+    ) async throws -> EngineSession? {
+        try checkModeSwitch(previous, cancellation: cancellation)
+        guard sendDrain.isIdle else { return nil }
+        guard previous.syncEngine.state.pendingDatabaseChanges.isEmpty else {
+            throw CloudSaveEngineError.configuredZoneFetchFailed
+        }
+
+        await fetchCoordinator.invalidate()
+        try checkModeSwitch(previous, cancellation: cancellation)
+        let ledger: CloudSavePendingChangesSnapshot?
+        do {
+            ledger = automaticallySync ? try await readPendingChangesSnapshot() : nil
+        } catch {
+            throw FetchModeSwitchError.ledgerReadFailed(error)
+        }
+        try checkModeSwitch(previous, cancellation: cancellation)
+        guard sendDrain.isIdle else { return nil }
+        guard previous.syncEngine.state.pendingDatabaseChanges.isEmpty else {
+            throw CloudSaveEngineError.configuredZoneFetchFailed
+        }
+        if let ledger {
+            // A superseding enqueue cannot be replayed after this snapshot stops
+            // tracking mutations. Retry before exposing any stale batch to the new engine.
+            guard isCurrent(ledger, syncEngine: previous.syncEngine),
+                ledger.mutationGeneration == ledgerSnapshotTracker.mutationGeneration
+            else { return nil }
+        }
+
+        let engine = makeSyncEngine(automaticallySync: automaticallySync)
+        storedSyncEngine = engine
+        stateMachine.resetActiveOperations()
+        if let ledger {
+            _ = restoreDurablePendingChanges(ledger, syncEngine: engine)
+        }
+        sendDrain.openAdmission()
+        publishStatus(syncEngine: engine)
+        return (engine, lifecycleGeneration)
+    }
+
+    private func checkModeSwitch(_ previous: EngineSession, cancellation: Int?) throws {
+        try validate(previous)
+        if let cancellation { try checkFetchCancellation(cancellation) }
+    }
+
+    private func checkFetchCancellation(_ generation: Int) throws {
+        try Task.checkCancellation()
+        guard generation == cancellationGeneration else { throw CancellationError() }
+    }
+
+    private func waitForOutstandingSends() async throws {
+        try Task.checkCancellation()
+        guard !sendDrain.isIdle else { return }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    sendDrain.wait(id: id, continuation: continuation)
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelSendDrainWait(id: id) }
+        }
+    }
+
+    private func cancelSendDrainWait(id: UUID) {
+        sendDrain.cancelWait(id: id)
     }
 }
 
@@ -341,7 +508,7 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
         guard privateSessionIsActive, !requiresReconfiguration,
             !isLifecycleTransitionPending,
             storedSyncEngine === syncEngine,
-            !stateMachine.requiresHostRecovery
+            !stateMachine.requiresHostRecovery, !sendDrain.isClosed
         else {
             return nil
         }
@@ -361,7 +528,7 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
             do {
                 let record = try await client.record(for: recordID)
                 guard
-                    await self?.isActive(
+                    await self?.canProvideBatch(
                         syncEngine: syncEngine,
                         lifecycleGeneration: batchLifecycleGeneration
                     ) == true
@@ -390,7 +557,7 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
             }
         }
         guard
-            isActive(
+            canProvideBatch(
                 syncEngine: syncEngine,
                 lifecycleGeneration: batchLifecycleGeneration
             )
@@ -398,6 +565,9 @@ extension CloudSaveEngine: CKSyncEngineDelegate {
             return nil
         }
 
+        if let batch, !batch.recordsToSave.isEmpty || !batch.recordIDsToDelete.isEmpty {
+            sendDrain.issueBatch()
+        }
         return batch
     }
 }
@@ -436,16 +606,15 @@ extension CloudSaveEngine {
                     syncEngine: syncEngine
                 )
             case .fetchedDatabaseChanges(let event):
+                let configuredZoneChanged =
+                    event.modifications.contains { isInConfiguredZone($0.zoneID) }
+                    || event.deletions.contains { isInConfiguredZone($0.zoneID) }
+                await fetchCoordinator.observeDatabaseDiscovery(configuredZoneChanged: configuredZoneChanged)
                 CloudSaveLogging.log(
                     CloudSaveLogging.fetchedDatabaseChanges(
                         modifications: event.modifications.count,
                         deletions: event.deletions.count,
-                        configuredZoneChanged: event.modifications.contains {
-                            isInConfiguredZone($0.zoneID)
-                        }
-                            || event.deletions.contains {
-                                isInConfiguredZone($0.zoneID)
-                            }
+                        configuredZoneChanged: configuredZoneChanged
                     )
                 )
                 try await restoreDeletedZones(
@@ -485,6 +654,7 @@ extension CloudSaveEngine {
                     "\(CloudSaveLogging.fetchGeneration(generation, phase: "started")), reason=\(reason)"
                 )
             case .willSendChanges:
+                sendDrain.beginSend()
                 begin(.sending, syncEngine: syncEngine)
             case .didFetchChanges:
                 complete(.fetching, syncEngine: syncEngine)
@@ -492,6 +662,7 @@ extension CloudSaveEngine {
                 CloudSaveLogging.log(CloudSaveLogging.fetchGeneration(generation, phase: "completed"))
             case .didSendChanges:
                 complete(.sending, syncEngine: syncEngine)
+                sendDrain.finishSend()
             case .willFetchRecordZoneChanges(let event):
                 guard isInConfiguredZone(event.zoneID) else {
                     break
@@ -504,6 +675,8 @@ extension CloudSaveEngine {
                 CloudSaveLogging.log(CloudSaveLogging.configuredZoneFetchCompleted(error: event.error))
                 if let error = event.error {
                     await fetchCoordinator.failConfiguredZoneFetch(error: error)
+                } else {
+                    await fetchCoordinator.confirmConfiguredZoneFetch()
                 }
             @unknown default:
                 CloudSaveLogging.log(
@@ -559,23 +732,24 @@ extension CloudSaveEngine {
             && !stateMachine.requiresHostRecovery
     }
 
+    private func canProvideBatch(syncEngine: CKSyncEngine, lifecycleGeneration: Int) -> Bool {
+        isActive(syncEngine: syncEngine, lifecycleGeneration: lifecycleGeneration) && !sendDrain.isClosed
+    }
+
     /// Creates a CKSyncEngine from the last state successfully persisted by the host.
-    fileprivate func makeSyncEngine() -> CKSyncEngine {
+    fileprivate func makeSyncEngine(automaticallySync: Bool? = nil) -> CKSyncEngine {
         var engineConfiguration = CKSyncEngine.Configuration(
             database: configuration.database,
             stateSerialization: lastPersistedStateSerialization,
             delegate: self
         )
-        engineConfiguration.automaticallySync = configuration.automaticallySync
+        engineConfiguration.automaticallySync = automaticallySync ?? configuration.automaticallySync
         engineConfiguration.subscriptionID = configuration.subscriptionID
         return CKSyncEngine(engineConfiguration)
     }
 
     /// Returns the active engine or rejects work until its lifecycle is recovered.
-    fileprivate func operationalSyncEngine() throws -> (
-        syncEngine: CKSyncEngine,
-        lifecycleGeneration: Int
-    ) {
+    private func operationalSyncEngine() throws -> EngineSession {
         try configuration.privateSession?.check()
         guard !requiresReconfiguration,
             !isLifecycleTransitionPending,
@@ -597,11 +771,8 @@ extension CloudSaveEngine {
     }
 
     /// Verifies that an actor-reentrant operation still belongs to the active engine.
-    fileprivate func validate(
-        _ session: (
-            syncEngine: CKSyncEngine,
-            lifecycleGeneration: Int
-        )
+    private func validate(
+        _ session: EngineSession
     ) throws {
         try configuration.privateSession?.check()
         guard !isLifecycleTransitionPending,
@@ -654,6 +825,7 @@ extension CloudSaveEngine {
         isAccountTransitionPending = false
         needsAccountTransitionLedgerRefresh = false
         lifecycleGeneration &+= 1
+        sendDrain.invalidate()
         await fetchCoordinator.invalidate()
         stateMachine.fail(
             failure,
@@ -780,6 +952,7 @@ extension CloudSaveEngine {
                 return CloudSavePendingChangesSnapshot(
                     lifecycleGeneration: snapshotLifecycleGeneration,
                     ledgerGeneration: ledgerSnapshotTracker.currentGeneration,
+                    mutationGeneration: ledgerSnapshotTracker.mutationGeneration,
                     durableChanges: durableChanges,
                     subsequentMutations: subsequentMutations
                 )
@@ -1575,6 +1748,7 @@ extension CloudSaveEngine {
         guard let context = configuration.privateSession, storedSyncEngine != nil else { return }
         context.sessionGate.close(reason)
         lifecycleGeneration &+= 1
+        sendDrain.invalidate()
         let retiredEngine = storedSyncEngine
         storedSyncEngine = nil
         let failure: CloudSaveFailure =

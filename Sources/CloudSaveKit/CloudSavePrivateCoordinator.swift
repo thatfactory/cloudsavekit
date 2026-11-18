@@ -165,6 +165,19 @@ public actor CloudSavePrivateCoordinator {
         client: any CloudSaveClient,
         automaticallySync: Bool = true
     ) throws -> CloudSavePrivateSession {
+        try makeSession(
+            for: bootstrap, stateSerialization: stateSerialization, client: client,
+            automaticallySync: automaticallySync, recoverUnconfirmedFetch: false)
+    }
+
+    /// Uses a manual SDK fetch to recover an automatic engine's explicit fetch without server discovery.
+    public func makeSession<Value: Sendable>(
+        for bootstrap: CloudSavePrivateBootstrap<Value>,
+        stateSerialization: CKSyncEngine.State.Serialization?,
+        client: any CloudSaveClient,
+        automaticallySync: Bool = true,
+        recoverUnconfirmedFetch: Bool
+    ) throws -> CloudSavePrivateSession {
         try validate(bootstrap.account)
         guard let database else {
             throw CloudSavePrivateError.transport(.configuration, retryAfterSeconds: nil)
@@ -172,7 +185,8 @@ public actor CloudSavePrivateCoordinator {
         let session = CloudSavePrivateSession(
             context: try sessionContext(for: bootstrap),
             database: database, stateSerialization: stateSerialization, client: client,
-            automaticallySync: automaticallySync, transport: transport, requests: requests
+            automaticallySync: automaticallySync, recoverUnconfirmedFetch: recoverUnconfirmedFetch,
+            transport: transport, requests: requests
         )
         sessions.removeAll { $0.value == nil }
         sessions.append(WeakSession(value: session))

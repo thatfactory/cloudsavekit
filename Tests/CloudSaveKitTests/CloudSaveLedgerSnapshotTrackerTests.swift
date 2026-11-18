@@ -82,6 +82,21 @@ struct CloudSaveLedgerSnapshotTrackerTests {
         #expect(tracker.completeSnapshot(snapshot) == [])
     }
 
+    @Test("A save following a completed delete snapshot advances the publication boundary")
+    func detectsSupersedingEnqueueAfterSnapshotCompletion() {
+        let recordID = Self.makeRecordID(named: "replacement")
+        var tracker = CloudSaveLedgerSnapshotTracker()
+        let snapshot = tracker.beginSnapshot()
+        tracker.recordEnqueues([.delete(recordID)])
+        #expect(tracker.completeSnapshot(snapshot) == [.enqueue(.delete(recordID))])
+        let finishedGeneration = tracker.mutationGeneration
+
+        tracker.recordEnqueues([.save(recordID)])
+
+        #expect(tracker.mutationGeneration != finishedGeneration)
+        #expect(tracker.completeSnapshot(tracker.beginSnapshot()) == [])
+    }
+
     @Test("Cancelling one ledger read keeps changes needed by an older read")
     func cancelsSnapshotsIndependently() {
         let change = CloudSavePendingChange.save(

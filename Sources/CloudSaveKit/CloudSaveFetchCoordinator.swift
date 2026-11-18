@@ -6,9 +6,11 @@ actor CloudSaveFetchCoordinator {
     private var completedGeneration = 0
     private var fetchGeneration = 0
     private var failedFetchGenerations: Set<Int> = []
+    private var discovery: [Int: Discovery] = [:]
     private var transportErrors: [Int: any Error] = [:]
     private var idleWaiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
     private var latestSuccessfulFetchGeneration = 0
+    private var latestConfirmedFetchGeneration = 0
     private var lifecycleGeneration = 0
     private var requestGeneration = 0
 
@@ -45,8 +47,12 @@ actor CloudSaveFetchCoordinator {
         }
         let generation = activeFetchGenerations.removeFirst()
         completedGeneration = max(completedGeneration, generation)
+        let confirmed = discovery.removeValue(forKey: generation)?.isComplete ?? false
         if !failedFetchGenerations.contains(generation) {
             latestSuccessfulFetchGeneration = max(latestSuccessfulFetchGeneration, generation)
+            if confirmed {
+                latestConfirmedFetchGeneration = max(latestConfirmedFetchGeneration, generation)
+            }
         }
         if activeFetchGenerations.isEmpty {
             resumeIdleWaiters()
@@ -63,13 +69,29 @@ actor CloudSaveFetchCoordinator {
         if transportErrors[generation] == nil { transportErrors[generation] = error }
     }
 
+    /// Records whether database discovery requires the configured zone to be fetched.
+    func observeDatabaseDiscovery(configuredZoneChanged: Bool) {
+        guard let generation = activeFetchGenerations.first else { return }
+        discovery[generation, default: Discovery()].scannedDatabase = true
+        if configuredZoneChanged {
+            discovery[generation, default: Discovery()].configuredZoneChanged = true
+        }
+    }
+
+    /// Records the successful end of an actual fetch of the configured zone.
+    func confirmConfiguredZoneFetch() {
+        guard let generation = activeFetchGenerations.first else { return }
+        discovery[generation, default: Discovery()].fetchedConfiguredZone = true
+    }
+
     /// Verifies that a fetch which began no earlier than the request has completed.
-    func validate(_ request: Request, preservingTransportError: Bool = false) throws {
+    @discardableResult
+    func validate(_ request: Request, preservingTransportError: Bool = false) throws -> Bool {
         guard request.lifecycleGeneration == lifecycleGeneration else {
             throw CloudSaveEngineError.hostRecoveryRequired
         }
         if latestSuccessfulFetchGeneration >= request.requiredFetchGeneration {
-            return
+            return latestConfirmedFetchGeneration >= request.requiredFetchGeneration
         }
         guard completedGeneration >= request.requiredFetchGeneration else {
             throw CloudSaveEngineError.freshFetchNotObserved
@@ -90,8 +112,10 @@ actor CloudSaveFetchCoordinator {
         lifecycleGeneration &+= 1
         activeFetchGenerations.removeAll()
         failedFetchGenerations.removeAll()
+        discovery.removeAll()
         transportErrors.removeAll()
         latestSuccessfulFetchGeneration = 0
+        latestConfirmedFetchGeneration = 0
         let waiters = idleWaiters.values
         idleWaiters.removeAll()
         for waiter in waiters {
@@ -103,6 +127,16 @@ actor CloudSaveFetchCoordinator {
 // MARK: - Request
 
 extension CloudSaveFetchCoordinator {
+    private struct Discovery {
+        var scannedDatabase = false
+        var configuredZoneChanged = false
+        var fetchedConfiguredZone = false
+
+        var isComplete: Bool {
+            fetchedConfiguredZone || (scannedDatabase && !configuredZoneChanged)
+        }
+    }
+
     /// Identifies the minimum qualifying fetch generation for one explicit request.
     struct Request: Equatable, Sendable {
         let lifecycleGeneration: Int

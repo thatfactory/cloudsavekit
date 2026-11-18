@@ -14,6 +14,9 @@ struct CloudSaveLedgerSnapshotTracker: Sendable {
         latestInvalidationGeneration
     }
 
+    /// The newest enqueue or removal, including work received between snapshots.
+    var mutationGeneration: Int { latestGeneration }
+
     /// Begins tracking changes that can race with one host-ledger read.
     mutating func beginSnapshot() -> Snapshot {
         nextIdentifier &+= 1
@@ -95,12 +98,9 @@ extension CloudSaveLedgerSnapshotTracker {
 
     /// Records ledger mutations only while at least one asynchronous snapshot is suspended.
     private mutating func record(_ mutations: [CloudSaveLedgerMutation]) {
-        guard !activeSnapshots.isEmpty else {
-            return
-        }
-
         for mutation in mutations {
             latestGeneration &+= 1
+            guard !activeSnapshots.isEmpty else { continue }
             ledgerMutations.append(
                 TrackedMutation(
                     generation: latestGeneration,

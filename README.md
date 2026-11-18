@@ -42,7 +42,7 @@ Add CloudSaveKit to your package dependencies:
 ```swift
 .package(
     url: "https://github.com/thatfactory/cloudsavekit.git",
-    from: "0.3.1"
+    from: "0.3.2"
 )
 ```
 
@@ -111,6 +111,8 @@ Automatic synchronization should remain enabled in production. Explicit operatio
 For a complete integration checklist, including application capabilities, signing verification, durable-state requirements, shared-zone rules, explicit-operation semantics, and diagnostic guidance, read the [CloudSaveKit documentation](https://thatfactory.github.io/cloudsavekit/documentation/cloudsavekit/).
 
 Explicit operations are serialized per engine. An explicit fetch waits for any fetch already active when the request arrives, then requires a fetch generation that began after the request before reporting success. Because CKSyncEngine completes its API call only after related delegate events finish, success is both a freshness barrier and an apply barrier for the configured zone. A post-request automatic fetch may satisfy the barrier; a pre-request fetch cannot. `freshFetchNotObserved` is raised instead of reporting false success if CKSyncEngine returns without a qualifying generation. A configured-zone fetch error also fails its qualifying explicit request. Privacy-safe stage logs report database discovery, configured-zone delivery counts, per-zone completion, and dirty-state transitions without exposing zone or record identities.
+
+Personal sessions can opt into `recoverUnconfirmedFetch: true` when calling `CloudSavePrivateCoordinator.makeSession`. If a successful explicit request on the automatic engine provides insufficient evidence that the configured zone was checked, the session temporarily attaches a manual engine using its latest persisted checkpoint. It drains issued sends before the change and restores automatic scheduling with the current durable ledger after the manual fetch.
 
 Call `start()` successfully before any explicit synchronization. `fetchNow()` and `sendNow()` throw `CloudSaveEngineError.notStarted` before startup and `CloudSaveEngineError.hostRecoveryRequired` after a host persistence callback fails. Once the local store is healthy again, call `start()` to rebuild from the last successfully persisted CKSyncEngine checkpoint and the host's current durable pending-change ledger.
 
